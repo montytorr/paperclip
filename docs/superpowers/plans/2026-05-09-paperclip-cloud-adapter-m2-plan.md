@@ -235,202 +235,331 @@ git add packages/workspace-strategy pnpm-lock.yaml
 git commit -m "feat(workspace-strategy): scaffold package"
 ```
 
-### Task 2: Define `WorkspaceStrategySpec` types and JSON schema
+### Task 2: Move workspace strategy types from `@paperclipai/shared` into new package
+
+> **Revision (2026-05-09):** The original plan invented a parallel `WorkspaceStrategySpec` type. The codebase already has `ExecutionWorkspaceStrategy` and `WorkspaceRealizationRequest`/`Record` in `packages/shared/src/types/workspace-runtime.ts`, consumed by `server/src/services/{execution-workspaces,workspace-realization,heartbeat}.ts` and others. To resolve Risk #1 properly, this task **moves the canonical types** to the new package and re-exports them from `@paperclipai/shared` so the existing call graph keeps working unchanged.
 
 **Files:**
-- Create: `packages/workspace-strategy/src/types.ts`
-- Create: `packages/workspace-strategy/src/types.test.ts`
+- Modify: `packages/shared/src/types/workspace-runtime.ts` (move strategy/realization types out)
+- Create: `packages/workspace-strategy/src/types.ts` (new home for the moved types)
+- Modify: `packages/workspace-strategy/src/index.ts` (re-export public surface)
+- Modify: `packages/shared/package.json` (add `@paperclipai/workspace-strategy` as a workspace dep)
+- Modify: `packages/shared/src/types/index.ts` (re-export so existing import paths keep working)
+- Test: `packages/workspace-strategy/src/types.test.ts`
 
-- [ ] **Step 1: Failing test asserting the union shape and serialization round-trip**
+**Types to move** (verbatim — do NOT change shapes):
+- `ExecutionWorkspaceStrategyType`
+- `ExecutionWorkspaceStrategy`
+- `WorkspaceRealizationTransport`
+- `WorkspaceRealizationSyncStrategy`
+- `WorkspaceRealizationRequest`
+- `WorkspaceRealizationRecord`
+
+Leave the rest of `workspace-runtime.ts` (workspace-runtime services, mode/status/closeReadiness types, `ExecutionWorkspace`, etc.) in place for now. Those are server-runtime concepts that the init container does not need.
+
+- [ ] **Step 1: Add `@paperclipai/workspace-strategy` as a dep of `@paperclipai/shared`**
+
+In `packages/shared/package.json`:
+
+```json
+"dependencies": {
+  ...
+  "@paperclipai/workspace-strategy": "workspace:*"
+}
+```
+
+Run `pnpm install` from the repo root.
+
+- [ ] **Step 2: Write the failing test for the new package's exports**
+
+`packages/workspace-strategy/src/types.test.ts`:
 
 ```ts
-// packages/workspace-strategy/src/types.test.ts
 import { describe, it, expect, expectTypeOf } from "vitest";
-import { type WorkspaceStrategySpec, parseWorkspaceStrategySpec, serializeWorkspaceStrategySpec } from "./index.js";
+import {
+  type ExecutionWorkspaceStrategy,
+  type ExecutionWorkspaceStrategyType,
+  type WorkspaceRealizationRequest,
+  type WorkspaceRealizationRecord,
+  type WorkspaceRealizationTransport,
+} from "./index.js";
 
-describe("WorkspaceStrategySpec", () => {
-  it("accepts a git-clone variant", () => {
-    const spec: WorkspaceStrategySpec = {
-      kind: "git-clone",
-      url: "https://github.com/acme/repo.git",
-      ref: "main",
-      resetOnCorrupt: true,
-    };
-    expectTypeOf(spec.kind).toEqualTypeOf<"git-clone" | "git-worktree" | "existing-path" | "none">();
+describe("workspace-strategy package types", () => {
+  it("ExecutionWorkspaceStrategyType is the existing four-variant union", () => {
+    const t: ExecutionWorkspaceStrategyType = "git_worktree";
+    expectTypeOf(t).toEqualTypeOf<
+      "project_primary" | "git_worktree" | "adapter_managed" | "cloud_sandbox"
+    >();
   });
 
-  it("round-trips git-clone via serialize/parse", () => {
-    const spec: WorkspaceStrategySpec = {
-      kind: "git-clone", url: "https://github.com/acme/repo.git", ref: "main", resetOnCorrupt: true,
+  it("ExecutionWorkspaceStrategy keeps the existing field shape", () => {
+    const s: ExecutionWorkspaceStrategy = {
+      type: "git_worktree",
+      baseRef: "main",
+      branchTemplate: "agent/{{issueId}}",
+      worktreeParentDir: "/repos/_worktrees",
     };
-    const json = serializeWorkspaceStrategySpec(spec);
-    expect(JSON.parse(json)).toMatchObject({ kind: "git-clone", url: spec.url, ref: spec.ref });
-    const parsed = parseWorkspaceStrategySpec(json);
-    expect(parsed).toEqual(spec);
+    expect(s.type).toBe("git_worktree");
   });
 
-  it("rejects an unknown kind", () => {
-    expect(() => parseWorkspaceStrategySpec(JSON.stringify({ kind: "bogus" }))).toThrow(/unknown kind/i);
+  it("WorkspaceRealizationRequest has version=1 and source/runtimeOverlay groups", () => {
+    const r: WorkspaceRealizationRequest = {
+      version: 1,
+      adapterType: "claude_local",
+      companyId: "c_1",
+      environmentId: "env_1",
+      executionWorkspaceId: null,
+      issueId: null,
+      heartbeatRunId: "hb_1",
+      requestedMode: null,
+      source: {
+        kind: "project_primary",
+        localPath: "/workspace",
+        projectId: null,
+        projectWorkspaceId: null,
+        repoUrl: "https://github.com/acme/repo.git",
+        repoRef: "main",
+        strategy: "project_primary",
+        branchName: null,
+        worktreePath: null,
+      },
+      runtimeOverlay: {
+        provisionCommand: null,
+        teardownCommand: null,
+        cleanupCommand: null,
+        workspaceRuntime: null,
+      },
+    };
+    expect(r.version).toBe(1);
+  });
+
+  it("transport union exposes the four canonical values", () => {
+    const t: WorkspaceRealizationTransport = "ssh";
+    expectTypeOf(t).toEqualTypeOf<"local" | "ssh" | "sandbox" | "plugin">();
   });
 });
 ```
 
-- [ ] **Step 2: Run, expect failure**
-
-`pnpm --filter @paperclipai/workspace-strategy test types`
-
-- [ ] **Step 3: Implement `src/types.ts`**
-
-```ts
-export type WorkspaceStrategyKind = "git-clone" | "git-worktree" | "existing-path" | "none";
-
-export interface GitCloneStrategy {
-  kind: "git-clone";
-  url: string;
-  ref: string;            // branch | tag | sha
-  resetOnCorrupt?: boolean;
-}
-
-export interface GitWorktreeStrategy {
-  kind: "git-worktree";
-  url: string;
-  ref: string;
-  worktreeName: string;   // becomes /workspace/<worktreeName> on disk
-  resetOnCorrupt?: boolean;
-}
-
-export interface ExistingPathStrategy {
-  kind: "existing-path";
-  hostPath: string;       // not supported on k8s; rejected at config-validation time
-}
-
-export interface NoneStrategy { kind: "none"; }
-
-export type WorkspaceStrategySpec =
-  | GitCloneStrategy | GitWorktreeStrategy | ExistingPathStrategy | NoneStrategy;
-
-export function serializeWorkspaceStrategySpec(spec: WorkspaceStrategySpec): string {
-  return JSON.stringify(spec);
-}
-
-export function parseWorkspaceStrategySpec(json: string): WorkspaceStrategySpec {
-  const parsed = JSON.parse(json) as { kind?: unknown };
-  if (typeof parsed.kind !== "string") {
-    throw new Error(`Invalid workspace strategy: missing kind`);
-  }
-  switch (parsed.kind) {
-    case "git-clone":     return parsed as GitCloneStrategy;
-    case "git-worktree":  return parsed as GitWorktreeStrategy;
-    case "existing-path": return parsed as ExistingPathStrategy;
-    case "none":          return parsed as NoneStrategy;
-    default:
-      throw new Error(`Invalid workspace strategy: unknown kind "${parsed.kind}"`);
-  }
-}
+```bash
+pnpm --filter @paperclipai/workspace-strategy test
 ```
 
-Re-export from `src/index.ts`:
+Expected: FAIL — types not yet exported from the new package.
+
+- [ ] **Step 3: Move the types into `packages/workspace-strategy/src/types.ts`**
+
+Cut the six types listed above from `packages/shared/src/types/workspace-runtime.ts` (lines 1-5, 71-78, 234-314 in the current file) and paste them verbatim into `packages/workspace-strategy/src/types.ts`. Preserve all comments and field-level JSDoc. Do not change names or shapes.
+
+- [ ] **Step 4: Make `packages/workspace-strategy/src/index.ts` re-export them**
 
 ```ts
 export {
-  type WorkspaceStrategyKind, type WorkspaceStrategySpec,
-  type GitCloneStrategy, type GitWorktreeStrategy, type ExistingPathStrategy, type NoneStrategy,
-  serializeWorkspaceStrategySpec, parseWorkspaceStrategySpec,
+  type ExecutionWorkspaceStrategyType,
+  type ExecutionWorkspaceStrategy,
+  type WorkspaceRealizationTransport,
+  type WorkspaceRealizationSyncStrategy,
+  type WorkspaceRealizationRequest,
+  type WorkspaceRealizationRecord,
 } from "./types.js";
 ```
 
-- [ ] **Step 4: Run, expect PASS**
+(Drop the M1 `PACKAGE_NAME` placeholder from Task 1 — no longer needed.)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Re-export from `@paperclipai/shared` so existing callers don't break**
 
-```bash
-git add packages/workspace-strategy/src/types.ts \
-        packages/workspace-strategy/src/types.test.ts \
-        packages/workspace-strategy/src/index.ts
-git commit -m "feat(workspace-strategy): add WorkspaceStrategySpec types and JSON schema"
+In `packages/shared/src/types/workspace-runtime.ts`, replace the just-removed type definitions with:
+
+```ts
+export {
+  type ExecutionWorkspaceStrategyType,
+  type ExecutionWorkspaceStrategy,
+  type WorkspaceRealizationTransport,
+  type WorkspaceRealizationSyncStrategy,
+  type WorkspaceRealizationRequest,
+  type WorkspaceRealizationRecord,
+} from "@paperclipai/workspace-strategy";
 ```
 
-### Task 3: Implement `executeStrategy` with git-runner abstraction
+`packages/shared/src/types/index.ts` and `packages/shared/src/index.ts` already do `export * from "./types/workspace-runtime.js"` — verify (do not duplicate).
+
+- [ ] **Step 6: Run the new package's tests**
+
+```bash
+pnpm --filter @paperclipai/workspace-strategy test
+```
+
+Expected: PASS.
+
+- [ ] **Step 7: Run server + shared tests to confirm zero regression from the type move**
+
+```bash
+pnpm --filter @paperclipai/shared build
+pnpm --filter @paperclipai/server test
+```
+
+Expected: PASS — the re-export from `@paperclipai/shared` keeps every existing import working.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add packages/workspace-strategy packages/shared pnpm-lock.yaml
+git commit -m "refactor(workspace-strategy): extract strategy/realization types from @paperclipai/shared"
+```
+
+### Task 3: Implement `executeWorkspaceStrategy()` for the k8s init container
+
+> **Revision (2026-05-09):** Builds on the moved types. Adds the **net-new** capability the init container needs: given a `WorkspaceRealizationRequest`, perform git-clone or bare+worktree-add at a target path. The existing server code didn't need this because clones happened on the user's machine; the k8s init container has no pre-existing local clone.
 
 **Files:**
 - Create: `packages/workspace-strategy/src/git-runner.ts`
 - Create: `packages/workspace-strategy/src/execute.ts`
 - Create: `packages/workspace-strategy/src/git-clone.ts`
 - Create: `packages/workspace-strategy/src/git-worktree.ts`
-- Create: `packages/workspace-strategy/test/execute.test.ts`
+- Modify: `packages/workspace-strategy/src/index.ts` (add new exports)
+- Test: `packages/workspace-strategy/test/execute.test.ts`
 
-- [ ] **Step 1: Failing test for git-clone happy path with mocked git-runner**
+**Public API:**
+
+```ts
+export async function executeWorkspaceStrategy(
+  request: WorkspaceRealizationRequest,
+  root: string,
+  deps: ExecuteStrategyDeps,
+): Promise<void>
+```
+
+**Strategy dispatch** based on `request.source.strategy`:
+
+| Strategy | Behavior |
+|---|---|
+| `project_primary` | If `root/.git` exists: `git fetch + git reset --hard origin/<repoRef>`. Else: `git clone --branch <repoRef> <repoUrl> root`. |
+| `git_worktree` | Bare clone at `root/.bare`, then `git worktree add <root>/<worktreeName> <repoRef>`. Warm path: fetch + reset --hard. |
+| `adapter_managed` | No-op. The adapter container handles workspace setup itself. |
+| `cloud_sandbox` | No-op. Sandbox provider handles workspace setup. |
+
+**Credential handling:** `deps.getGitCredentials()` returns `{ username, password }`. Caller (workspace-init script in Task 6) supplies a callback that calls `POST /api/workspace/git-credentials` (Task 15). Credentials are injected via the URL for the cold clone and via `GIT_ASKPASS=/bin/true + GIT_USERNAME/GIT_PASSWORD env` for warm fetches.
+
+**Behavior on `repoUrl === null`:** Throw — the init container needs an explicit URL. Server code that wraps a `WorkspaceRealizationRequest` for k8s execution must populate `repoUrl`/`repoRef`.
+
+- [ ] **Step 1: Failing test for project_primary cold-clone happy path**
 
 ```ts
 // packages/workspace-strategy/test/execute.test.ts
 import { describe, it, expect, vi } from "vitest";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { executeStrategy } from "../src/index.js";
+import { executeWorkspaceStrategy } from "../src/index.js";
+import type { WorkspaceRealizationRequest } from "../src/index.js";
 
-function makeFakeRunner() {
+function baseRequest(overrides: Partial<WorkspaceRealizationRequest["source"]> = {}): WorkspaceRealizationRequest {
   return {
-    run: vi.fn(async (cmd: string, args: string[], opts?: { cwd?: string }) => ({
-      exitCode: 0, stdout: "", stderr: "",
-    })),
+    version: 1,
+    adapterType: "claude_local",
+    companyId: "c_1",
+    environmentId: "env_1",
+    executionWorkspaceId: null,
+    issueId: null,
+    heartbeatRunId: "hb_1",
+    requestedMode: null,
+    source: {
+      kind: "project_primary",
+      localPath: "/workspace",
+      projectId: null,
+      projectWorkspaceId: null,
+      repoUrl: "https://github.com/acme/repo.git",
+      repoRef: "main",
+      strategy: "project_primary",
+      branchName: null,
+      worktreePath: null,
+      ...overrides,
+    },
+    runtimeOverlay: { provisionCommand: null, teardownCommand: null, cleanupCommand: null, workspaceRuntime: null },
   };
 }
 
-describe("executeStrategy", () => {
-  it("runs git clone for a cold workspace (empty directory)", async () => {
+function makeFakeRunner() {
+  return {
+    run: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" })),
+  };
+}
+
+describe("executeWorkspaceStrategy", () => {
+  it("project_primary cold-clones into an empty directory", async () => {
     const root = mkdtempSync(join(tmpdir(), "ws-"));
     try {
       const git = makeFakeRunner();
-      await executeStrategy(
-        { kind: "git-clone", url: "https://github.com/acme/repo.git", ref: "main" },
-        root,
-        { git, getGitCredentials: async () => ({ username: "x-access-token", password: "ghp_test" }) },
-      );
-      expect(git.run).toHaveBeenCalledWith("git", expect.arrayContaining(["clone"]), expect.any(Object));
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it("runs git fetch + reset for a warm workspace (.git exists)", async () => {
-    const root = mkdtempSync(join(tmpdir(), "ws-"));
-    try {
-      // Simulate warm by creating a .git directory.
-      const fs = await import("node:fs/promises");
-      await fs.mkdir(join(root, ".git"), { recursive: true });
-      const git = makeFakeRunner();
-      await executeStrategy(
-        { kind: "git-clone", url: "https://github.com/acme/repo.git", ref: "main" },
-        root,
-        { git, getGitCredentials: async () => ({ username: "x-access-token", password: "ghp_test" }) },
-      );
-      const calls = git.run.mock.calls.map(c => c[1].join(" "));
-      expect(calls.some(c => c.includes("fetch"))).toBe(true);
-      expect(calls.some(c => c.includes("reset --hard"))).toBe(true);
-      expect(calls.some(c => c.includes("clone"))).toBe(false);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it("rejects existing-path strategy (not supported in non-local execution)", async () => {
-    const root = mkdtempSync(join(tmpdir(), "ws-"));
-    try {
-      await expect(executeStrategy(
-        { kind: "existing-path", hostPath: "/some/path" } as never,
-        root,
-        { git: makeFakeRunner(), getGitCredentials: async () => ({ username: "", password: "" }), allowExistingPath: false },
-      )).rejects.toThrow(/existing-path|not supported/i);
+      await executeWorkspaceStrategy(baseRequest(), root, {
+        git,
+        getGitCredentials: async () => ({ username: "x-access-token", password: "ghp_test" }),
+      });
+      const cmd = git.run.mock.calls[0]?.[1] ?? [];
+      expect(cmd).toEqual(expect.arrayContaining(["clone", "--branch", "main"]));
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  it("no-op for kind=none", async () => {
+  it("project_primary warm path runs fetch + reset, not clone", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ws-"));
+    try {
+      const fs = await import("node:fs/promises");
+      await fs.mkdir(join(root, ".git"), { recursive: true });
+      const git = makeFakeRunner();
+      await executeWorkspaceStrategy(baseRequest(), root, {
+        git,
+        getGitCredentials: async () => ({ username: "x-access-token", password: "ghp_test" }),
+      });
+      const cmds = git.run.mock.calls.map((c) => (c[1] as string[]).join(" "));
+      expect(cmds.some((c) => c.includes("fetch"))).toBe(true);
+      expect(cmds.some((c) => c.includes("reset --hard"))).toBe(true);
+      expect(cmds.some((c) => c.includes("clone"))).toBe(false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("git_worktree creates a bare clone + worktree", async () => {
     const root = mkdtempSync(join(tmpdir(), "ws-"));
     try {
       const git = makeFakeRunner();
-      await executeStrategy({ kind: "none" }, root, { git, getGitCredentials: async () => ({ username: "", password: "" }) });
-      expect(git.run).not.toHaveBeenCalled();
+      await executeWorkspaceStrategy(
+        baseRequest({ strategy: "git_worktree", worktreePath: "feature-x" }),
+        root,
+        { git, getGitCredentials: async () => ({ username: "u", password: "p" }) },
+      );
+      const cmds = git.run.mock.calls.map((c) => (c[1] as string[]).join(" "));
+      expect(cmds.some((c) => c.includes("clone --bare"))).toBe(true);
+      expect(cmds.some((c) => c.includes("worktree add"))).toBe(true);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("adapter_managed and cloud_sandbox are no-ops (adapter handles workspace itself)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ws-"));
+    try {
+      const git = makeFakeRunner();
+      await executeWorkspaceStrategy(
+        baseRequest({ strategy: "project_primary" as never }),
+        root,
+        { git, getGitCredentials: async () => ({ username: "", password: "" }) },
+      ); // baseline
+
+      const callsBefore = git.run.mock.calls.length;
+      // adapter_managed
+      await executeWorkspaceStrategy(
+        { ...baseRequest(), source: { ...baseRequest().source, strategy: "adapter_managed" as never } },
+        root,
+        { git, getGitCredentials: async () => ({ username: "", password: "" }) },
+      );
+      expect(git.run.mock.calls.length).toBe(callsBefore); // no new calls
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("throws when repoUrl is missing (init container can't infer the URL)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ws-"));
+    try {
+      await expect(
+        executeWorkspaceStrategy(baseRequest({ repoUrl: null }), root, {
+          git: makeFakeRunner(),
+          getGitCredentials: async () => ({ username: "", password: "" }),
+        }),
+      ).rejects.toThrow(/repoUrl/i);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
@@ -467,7 +596,7 @@ export const realGitRunner: GitRunner = {
 ```ts
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { GitCloneStrategy } from "./types.js";
+import type { WorkspaceRealizationRequest } from "./types.js";
 import type { GitRunner } from "./git-runner.js";
 
 export interface GitCloneDeps {
@@ -475,11 +604,15 @@ export interface GitCloneDeps {
   getGitCredentials(): Promise<{ username: string; password: string }>;
 }
 
-export async function executeGitClone(
-  spec: GitCloneStrategy,
+export async function executeProjectPrimaryClone(
+  request: WorkspaceRealizationRequest,
   root: string,
   deps: GitCloneDeps,
 ): Promise<void> {
+  const { repoUrl, repoRef } = request.source;
+  if (!repoUrl) throw new Error("executeWorkspaceStrategy: repoUrl is required for project_primary strategy");
+  const ref = repoRef ?? "HEAD";
+
   const creds = await deps.getGitCredentials();
   const env = {
     GIT_TERMINAL_PROMPT: "0",
@@ -490,30 +623,16 @@ export async function executeGitClone(
 
   const isWarm = existsSync(join(root, ".git"));
   if (!isWarm) {
-    const url = injectCreds(spec.url, creds);
-    const r = await deps.git.run("git", ["clone", "--branch", spec.ref, url, "."], { cwd: root, env });
-    if (r.exitCode !== 0) {
-      throw new Error(`git clone failed (${r.exitCode}): ${r.stderr}`);
-    }
+    const url = injectCreds(repoUrl, creds);
+    const r = await deps.git.run("git", ["clone", "--branch", ref, url, "."], { cwd: root, env });
+    if (r.exitCode !== 0) throw new Error(`git clone failed (${r.exitCode}): ${r.stderr}`);
     return;
   }
 
-  // Warm path: fetch + reset --hard
-  const fetched = await deps.git.run("git", ["fetch", "origin", spec.ref], { cwd: root, env });
-  if (fetched.exitCode !== 0) {
-    throw new Error(`git fetch failed (${fetched.exitCode}): ${fetched.stderr}`);
-  }
-  const reset = await deps.git.run("git", ["reset", "--hard", `origin/${spec.ref}`], { cwd: root, env });
-  if (reset.exitCode !== 0 && spec.resetOnCorrupt) {
-    // Last-resort: blow away and re-clone.
-    const fs = await import("node:fs/promises");
-    await fs.rm(root, { recursive: true, force: true });
-    await fs.mkdir(root, { recursive: true });
-    return executeGitClone(spec, root, deps);
-  }
-  if (reset.exitCode !== 0) {
-    throw new Error(`git reset --hard origin/${spec.ref} failed: ${reset.stderr}`);
-  }
+  const fetched = await deps.git.run("git", ["fetch", "origin", ref], { cwd: root, env });
+  if (fetched.exitCode !== 0) throw new Error(`git fetch failed (${fetched.exitCode}): ${fetched.stderr}`);
+  const reset = await deps.git.run("git", ["reset", "--hard", `origin/${ref}`], { cwd: root, env });
+  if (reset.exitCode !== 0) throw new Error(`git reset --hard origin/${ref} failed: ${reset.stderr}`);
 }
 
 function injectCreds(url: string, creds: { username: string; password: string }): string {
@@ -531,7 +650,7 @@ function injectCreds(url: string, creds: { username: string; password: string })
 // git-worktree.ts
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { GitWorktreeStrategy } from "./types.js";
+import type { WorkspaceRealizationRequest } from "./types.js";
 import type { GitRunner } from "./git-runner.js";
 
 export interface GitWorktreeDeps {
@@ -540,22 +659,25 @@ export interface GitWorktreeDeps {
 }
 
 export async function executeGitWorktree(
-  spec: GitWorktreeStrategy,
+  request: WorkspaceRealizationRequest,
   root: string,
   deps: GitWorktreeDeps,
 ): Promise<void> {
+  const { repoUrl, repoRef, worktreePath } = request.source;
+  if (!repoUrl) throw new Error("executeWorkspaceStrategy: repoUrl is required for git_worktree strategy");
+  const ref = repoRef ?? "HEAD";
+  const worktreeName = worktreePath ?? "default";
+
   const creds = await deps.getGitCredentials();
   const env = {
     GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "/bin/true",
     GIT_USERNAME: creds.username, GIT_PASSWORD: creds.password,
   };
   const bareDir = join(root, ".bare");
-  const worktreeDir = join(root, spec.worktreeName);
+  const worktreeDir = join(root, worktreeName);
 
   if (!existsSync(bareDir)) {
-    const url = spec.url.startsWith("https://")
-      ? new URL(spec.url).toString().replace(/^https:\/\//, `https://${encodeURIComponent(creds.username)}:${encodeURIComponent(creds.password)}@`)
-      : spec.url;
+    const url = injectCreds(repoUrl, creds);
     const r = await deps.git.run("git", ["clone", "--bare", url, bareDir], { env });
     if (r.exitCode !== 0) throw new Error(`git clone --bare failed: ${r.stderr}`);
   } else {
@@ -564,43 +686,45 @@ export async function executeGitWorktree(
   }
 
   if (!existsSync(worktreeDir)) {
-    const r = await deps.git.run("git", ["worktree", "add", "-f", worktreeDir, spec.ref], { cwd: bareDir, env });
+    const r = await deps.git.run("git", ["worktree", "add", "-f", worktreeDir, ref], { cwd: bareDir, env });
     if (r.exitCode !== 0) throw new Error(`git worktree add failed: ${r.stderr}`);
   } else {
-    const r = await deps.git.run("git", ["reset", "--hard", `origin/${spec.ref}`], { cwd: worktreeDir, env });
+    const r = await deps.git.run("git", ["reset", "--hard", `origin/${ref}`], { cwd: worktreeDir, env });
     if (r.exitCode !== 0) throw new Error(`git reset --hard failed: ${r.stderr}`);
   }
+}
+
+function injectCreds(url: string, creds: { username: string; password: string }): string {
+  if (!url.startsWith("https://")) return url;
+  const u = new URL(url);
+  u.username = encodeURIComponent(creds.username);
+  u.password = encodeURIComponent(creds.password);
+  return u.toString();
 }
 ```
 
 ```ts
 // execute.ts
-import type { WorkspaceStrategySpec } from "./types.js";
-import { executeGitClone, type GitCloneDeps } from "./git-clone.js";
+import type { WorkspaceRealizationRequest } from "./types.js";
+import { executeProjectPrimaryClone, type GitCloneDeps } from "./git-clone.js";
 import { executeGitWorktree, type GitWorktreeDeps } from "./git-worktree.js";
 
-export interface ExecuteStrategyDeps extends GitCloneDeps, GitWorktreeDeps {
-  /** When true (server-local execution), existing-path is allowed; when false (k8s), it's rejected. */
-  allowExistingPath?: boolean;
-}
+export interface ExecuteStrategyDeps extends GitCloneDeps, GitWorktreeDeps {}
 
-export async function executeStrategy(
-  spec: WorkspaceStrategySpec,
+export async function executeWorkspaceStrategy(
+  request: WorkspaceRealizationRequest,
   root: string,
   deps: ExecuteStrategyDeps,
 ): Promise<void> {
-  switch (spec.kind) {
-    case "git-clone":     return executeGitClone(spec, root, deps);
-    case "git-worktree":  return executeGitWorktree(spec, root, deps);
-    case "existing-path":
-      if (deps.allowExistingPath === false) {
-        throw new Error(
-          `Workspace strategy "existing-path" is not supported on this execution target ` +
-          `(host paths can't be projected into a remote pod). Use git-clone or git-worktree.`,
-        );
-      }
-      return; // local execution treats hostPath as already-prepared.
-    case "none":          return;
+  switch (request.source.strategy) {
+    case "project_primary":
+      return executeProjectPrimaryClone(request, root, deps);
+    case "git_worktree":
+      return executeGitWorktree(request, root, deps);
+    // adapter_managed / cloud_sandbox are no-ops in the init container —
+    // those adapters set up the workspace inside their own container.
+    default:
+      return;
   }
 }
 ```
@@ -608,11 +732,15 @@ export async function executeStrategy(
 Re-export from `index.ts`:
 
 ```ts
-export { executeStrategy, type ExecuteStrategyDeps } from "./execute.js";
+export { executeWorkspaceStrategy, type ExecuteStrategyDeps } from "./execute.js";
 export { realGitRunner, type GitRunner, type GitRunResult } from "./git-runner.js";
 ```
 
 - [ ] **Step 6: Run tests, expect PASS**
+
+```bash
+pnpm --filter @paperclipai/workspace-strategy test
+```
 
 - [ ] **Step 7: Commit**
 
@@ -623,62 +751,67 @@ git add packages/workspace-strategy/src/git-runner.ts \
         packages/workspace-strategy/src/execute.ts \
         packages/workspace-strategy/src/index.ts \
         packages/workspace-strategy/test/execute.test.ts
-git commit -m "feat(workspace-strategy): implement executeStrategy with git-clone, git-worktree, none, and existing-path rejection"
+git commit -m "feat(workspace-strategy): implement executeWorkspaceStrategy for k8s init container"
 ```
 
-### Task 4: Update server callers to use the new package
+### Task 4: Confirm migration is non-breaking via cross-package smoke
 
-**Files (audit):**
-- Find existing workspace strategy code in `server/src/services/` (search `workspace-strategy`, `workspace_strategy`, `WorkspaceStrategy`)
-- Modify each caller to import from `@paperclipai/workspace-strategy`
-- Add `@paperclipai/workspace-strategy` as a workspace dep to `server/package.json`
-- Delete the old in-server implementation OR shrink it to a thin wrapper that calls the package
+> **Revision (2026-05-09):** Because Task 2 keeps the existing import path `@paperclipai/shared` working via re-export, no caller migration is required. This task is now a verification pass — exercise the call graph that previously imported `WorkspaceRealizationRequest`/`Record` and confirm zero behavior change. Optional import-path hygiene (rewriting some imports to use `@paperclipai/workspace-strategy` directly) is deferred to a follow-up — out of M2 scope.
 
-- [ ] **Step 1: Locate existing strategy code**
+**Files:**
+- Read-only audit: every file under `server/src/` and `packages/` that imports the moved types.
 
-Run: `grep -rn "workspace.strategy\|WorkspaceStrategy" server/src/ | head -30`
-
-Note every file that defines or consumes the strategy.
-
-- [ ] **Step 2: Add workspace-strategy as workspace dep on server**
-
-Update `server/package.json`:
-
-```json
-"dependencies": {
-  ...
-  "@paperclipai/workspace-strategy": "workspace:*"
-}
-```
-
-Run `pnpm install`.
-
-- [ ] **Step 3: Replace internal strategy logic with package imports**
-
-For each caller, replace local imports with:
-
-```ts
-import { executeStrategy, type WorkspaceStrategySpec, parseWorkspaceStrategySpec, serializeWorkspaceStrategySpec } from "@paperclipai/workspace-strategy";
-```
-
-Pass `allowExistingPath: true` when calling from local execution code paths.
-
-- [ ] **Step 4: Run server tests, confirm no regressions**
+- [ ] **Step 1: Enumerate every import of the moved types**
 
 ```bash
-pnpm -w exec vitest run server/src
+grep -rn "ExecutionWorkspaceStrategy\|WorkspaceRealizationRequest\|WorkspaceRealizationRecord\|WorkspaceRealizationTransport\|WorkspaceRealizationSyncStrategy" \
+  server/src packages 2>/dev/null \
+  | grep -v node_modules | grep -v dist | grep -v ".test." \
+  | sort -u
 ```
 
-- [ ] **Step 5: If tests fail, the package's behavior diverges from the original**
+Record the count of files. After Task 2's re-export is in place, NONE of these should need to change. The audit's purpose is to give the regression test list a clear scope.
 
-Fix the package to match the original behavior, NOT the call sites. Add tests that capture the divergent behavior so future changes don't re-introduce.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 2: Run the type-checker across the workspace**
 
 ```bash
-git add server/src server/package.json pnpm-lock.yaml
-git commit -m "refactor(server): consume @paperclipai/workspace-strategy for workspace bootstrap"
+pnpm -w exec tsc -b
 ```
+
+Expected: PASS — the re-export means type identity is preserved across import paths.
+
+- [ ] **Step 3: Run server unit tests in full**
+
+```bash
+pnpm --filter @paperclipai/server test
+```
+
+Expected: PASS — every test that used to type-check against the moved types still passes against the re-exported version.
+
+- [ ] **Step 4: Run kubernetes-execution adapter tests**
+
+```bash
+pnpm --filter @paperclipai/execution-target-kubernetes test
+```
+
+Expected: PASS — the M1 driver imports nothing from these types yet, so this is a guard against accidental coupling.
+
+- [ ] **Step 5: Commit a follow-up note (no code change required if Steps 2-4 are green)**
+
+If the steps above all pass, commit a single doc note recording the migration is complete:
+
+```bash
+echo "## 2026-05-09 — Phase A complete
+
+Workspace strategy + realization types now live in @paperclipai/workspace-strategy.
+@paperclipai/shared re-exports them so existing callers were not modified.
+Callers may opt to migrate imports in a follow-up; this PR keeps blast radius
+to the smallest reasonable cross-section." >> docs/k8s-execution/CHANGELOG.md
+git add docs/k8s-execution/CHANGELOG.md
+git commit -m "docs(k8s-execution): note workspace-strategy package extract complete"
+```
+
+If any step above FAILS, the failure is a real regression from Task 2's type move — fix Task 2's re-export until all suites pass before claiming Phase A done.
 
 ---
 
