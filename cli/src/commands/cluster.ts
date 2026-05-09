@@ -70,6 +70,7 @@ export interface ClusterConnectionsService {
   get(id: string): Promise<ClusterConnectionRow | null>;
   delete(id: string): Promise<void>;
   resolve(id: string): Promise<ResolvedClusterConnection | null>;
+  update(id: string, input: { imageAllowlist?: string[] }): Promise<ClusterConnectionRow>;
 }
 
 export interface TenantPolicy {
@@ -169,12 +170,13 @@ export function createClusterCommand(deps: ClusterCommandDeps): ClusterCommand {
         case "remove":        return cmdRemove(rest, deps);
         case "ensure-tenant": return cmdEnsureTenant(rest, deps);
         case "doctor":        return cmdDoctor(rest, deps);
-        case "set-git-credentials": return cmdSetGitCredentials(rest, deps);
-        case "set-cilium-policy":   return cmdSetCiliumPolicy(rest, deps);
+        case "set-git-credentials":   return cmdSetGitCredentials(rest, deps);
+        case "set-cilium-policy":     return cmdSetCiliumPolicy(rest, deps);
+        case "set-image-allowlist":   return cmdSetImageAllowlist(rest, deps);
         default:
           deps.print(
             `Unknown subcommand: ${sub ?? "(none)"}\n` +
-            `Usage: cluster <add|list|test|remove|ensure-tenant|doctor|set-git-credentials|set-cilium-policy>`,
+            `Usage: cluster <add|list|test|remove|ensure-tenant|doctor|set-git-credentials|set-cilium-policy|set-image-allowlist>`,
           );
           return 2;
       }
@@ -494,5 +496,27 @@ async function cmdSetCiliumPolicy(argv: string[], deps: ClusterCommandDeps): Pro
   const dnsLabel = ciliumDnsAllowlist === undefined ? "(unchanged)" : `[${ciliumDnsAllowlist.join(", ")}]`;
   const cidrLabel = ciliumEgressCidrs === undefined ? "(unchanged)" : `[${ciliumEgressCidrs.join(", ")}]`;
   deps.print(`Updated tenant Cilium DSL: dns=${dnsLabel} cidrs=${cidrLabel}`);
+  return 0;
+}
+
+async function cmdSetImageAllowlist(argv: string[], deps: ClusterCommandDeps): Promise<number> {
+  const { flags } = parseFlags(argv);
+  const clusterId = flags["cluster"];
+  if (!clusterId) {
+    deps.print(
+      "Usage: cluster set-image-allowlist --cluster <id> [--prefixes \"a/,b/\"]\n" +
+        "  --prefixes \"\" clears the allow-list (default behavior).",
+    );
+    return 2;
+  }
+  const raw = flags["prefixes"] ?? "";
+  // Comma-list parsing: split, trim, drop empty entries.
+  const imageAllowlist = raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  await deps.clusterConnections.update(clusterId, { imageAllowlist });
+  if (imageAllowlist.length === 0) {
+    deps.print(`Cleared image_allowlist for cluster ${clusterId}`);
+  } else {
+    deps.print(`Updated image_allowlist for cluster ${clusterId}: ${imageAllowlist.join(", ")}`);
+  }
   return 0;
 }

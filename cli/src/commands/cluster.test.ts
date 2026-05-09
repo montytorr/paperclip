@@ -16,6 +16,7 @@ const MOCK_ROW = {
   paperclipPublicUrl: null,
   imageRegistry: null,
   allowAgentImageOverride: false,
+  imageAllowlist: [] as string[],
   createdAt: new Date(),
   createdBy: "x",
 };
@@ -37,6 +38,7 @@ function mocks(): ClusterCommandDeps {
       get: vi.fn(async () => MOCK_ROW) as any,
       delete: vi.fn(async () => {}) as any,
       resolve: vi.fn(async () => MOCK_RESOLVED) as any,
+      update: vi.fn(async () => MOCK_ROW) as any,
     },
     tenantPolicies: {
       get: vi.fn(async () => null) as any,
@@ -413,5 +415,44 @@ describe("cluster commands", () => {
     const code = await cmd.run(["set-cilium-policy", "--cluster", "c-1"]);
     expect(code).not.toBe(0);
     expect(m.tenantPolicies.upsert).not.toHaveBeenCalled();
+  });
+
+  it("set-image-allowlist: passes --prefixes through as a string array", async () => {
+    const m = mocks();
+    (m.clusterConnections.update as any) = vi.fn(async () => MOCK_ROW);
+    const cmd = createClusterCommand(m);
+    const code = await cmd.run([
+      "set-image-allowlist",
+      "--cluster", "c-1",
+      "--prefixes", "ghcr.io/paperclipai/,internal.acme.com/agents/",
+    ]);
+    expect(code).toBe(0);
+    const arg = (m.clusterConnections.update as any).mock.calls[0];
+    expect(arg[0]).toBe("c-1");
+    expect(arg[1].imageAllowlist).toEqual([
+      "ghcr.io/paperclipai/",
+      "internal.acme.com/agents/",
+    ]);
+  });
+
+  it("set-image-allowlist: empty --prefixes clears the list", async () => {
+    const m = mocks();
+    (m.clusterConnections.update as any) = vi.fn(async () => MOCK_ROW);
+    const cmd = createClusterCommand(m);
+    const code = await cmd.run([
+      "set-image-allowlist",
+      "--cluster", "c-1",
+      "--prefixes", "",
+    ]);
+    expect(code).toBe(0);
+    const arg = (m.clusterConnections.update as any).mock.calls[0];
+    expect(arg[1].imageAllowlist).toEqual([]);
+  });
+
+  it("set-image-allowlist: errors when --cluster missing", async () => {
+    const m = mocks();
+    const cmd = createClusterCommand(m);
+    const code = await cmd.run(["set-image-allowlist", "--prefixes", "x/"]);
+    expect(code).not.toBe(0);
   });
 });
