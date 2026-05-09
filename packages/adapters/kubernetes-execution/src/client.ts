@@ -7,6 +7,7 @@ import {
   ApiextensionsV1Api,
 } from "@kubernetes/client-node";
 import { Agent, request as httpsRequest, type RequestOptions as HttpsRequestOptions } from "node:https";
+import type { IncomingMessage } from "node:http";
 import { URL } from "node:url";
 import type { ResolvedClusterConnection, KubernetesApiClient } from "./types.js";
 
@@ -86,10 +87,8 @@ export function createKubernetesApiClient(connection: ResolvedClusterConnection)
     return httpsAgent;
   }
 
-  /**
-   * Build a node:https request configuration with full TLS + auth material.
-   * Centralised so `request` and `requestStream` share the exact same path.
-   */
+  // Build https.RequestOptions for an arbitrary k8s API path. Centralised so
+  // `request` and `requestStream` share the exact same auth path.
   async function buildAuthedRequest(
     method: string,
     path: string,
@@ -135,6 +134,26 @@ export function createKubernetesApiClient(connection: ResolvedClusterConnection)
     return { options, payload };
   }
 
+  function sendHttps(
+    options: HttpsRequestOptions,
+    payload: string | undefined,
+    timeoutMs?: number,
+    label?: string,
+  ): Promise<IncomingMessage> {
+    const reqOptions = timeoutMs !== undefined ? { ...options, timeout: timeoutMs } : options;
+    return new Promise((resolve, reject) => {
+      const req = httpsRequest(reqOptions, (res) => resolve(res));
+      req.once("error", reject);
+      if (timeoutMs !== undefined) {
+        req.once("timeout", () => {
+          req.destroy(new Error(`${label ?? "k8s API request"} timed out after ${timeoutMs}ms`));
+        });
+      }
+      if (payload !== undefined) req.write(payload);
+      req.end();
+    });
+  }
+
   return {
     core,
     batch,
@@ -150,19 +169,10 @@ export function createKubernetesApiClient(connection: ResolvedClusterConnection)
       // realistic API server tail latency but short enough that ensureTenant
       // surfaces an actionable error rather than appearing to stall.
       const REQUEST_TIMEOUT_MS = 30_000;
-      const incoming = await new Promise<import("node:http").IncomingMessage>((resolve, reject) => {
-        const req = httpsRequest({ ...options, timeout: REQUEST_TIMEOUT_MS }, (res) => resolve(res));
-        req.once("error", reject);
-        req.once("timeout", () => {
-          req.destroy(new Error(`k8s API ${method} ${path} timed out after ${REQUEST_TIMEOUT_MS}ms`));
-        });
-        if (payload !== undefined) req.write(payload);
-        req.end();
-      });
-
-      const status = incoming.statusCode ?? 0;
+      const res = await sendHttps(options, payload, REQUEST_TIMEOUT_MS, `k8s API ${method} ${path}`);
+      const status = res.statusCode ?? 0;
       const chunks: Buffer[] = [];
-      for await (const chunk of incoming) {
+      for await (const chunk of res) {
         chunks.push(chunk as Buffer);
       }
       const text = Buffer.concat(chunks).toString("utf-8");
@@ -174,36 +184,43 @@ export function createKubernetesApiClient(connection: ResolvedClusterConnection)
     },
     async requestStream(method: string, path: string, body?: unknown): Promise<Response> {
       const { options, payload } = await buildAuthedRequest(method, path, body);
-      // Streaming endpoints (pods/log, events?watch=true) deliver chunked
-      // bodies driven by the caller via Response.body.getReader(). No socket
-      // timeout: pod-log streams are intentionally long-lived; the caller is
-      // responsible for reconnect/cancellation policy.
-      const incoming = await new Promise<import("node:http").IncomingMessage>((resolve, reject) => {
-        const req = httpsRequest(options, (res) => resolve(res));
-        req.once("error", reject);
-        if (payload !== undefined) req.write(payload);
-        req.end();
-      });
-
-      const status = incoming.statusCode ?? 0;
-      // Wrap the IncomingMessage as a WHATWG Response so callers can use
-      // response.body.getReader() / response.text() uniformly.
-      const responseHeaders = new Headers();
-      for (const [k, v] of Object.entries(incoming.headers)) {
-        if (typeof v === "string") responseHeaders.append(k, v);
-        else if (Array.isArray(v)) for (const vv of v) responseHeaders.append(k, vv);
-      }
+      // No socket timeout: pod-log streams and event watches are intentionally
+      // long-lived. The caller drives reconnect / cancellation via the
+      // returned Response.body.getReader().
+      const incoming = await sendHttps(options, payload);
+      // Adapt the Node IncomingMessage into a Web Response so log-stream and
+      // event-watch consumers (which call response.body.getReader()) work
+      // uniformly.
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
-          incoming.on("data", (chunk) => controller.enqueue(chunk as Uint8Array));
-          incoming.on("end", () => controller.close());
-          incoming.on("error", (err) => controller.error(err));
+          incoming.on("data", (chunk: Buffer) => {
+            try {
+              controller.enqueue(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+            } catch {
+              /* controller already closed */
+            }
+          });
+          incoming.on("end", () => {
+            try { controller.close(); } catch { /* already closed */ }
+          });
+          incoming.on("error", (err) => {
+            try { controller.error(err); } catch { /* already errored */ }
+          });
         },
         cancel() {
           incoming.destroy();
         },
       });
-      return new Response(stream, { status, headers: responseHeaders });
+      const headers = new Headers();
+      for (const [k, v] of Object.entries(incoming.headers)) {
+        if (Array.isArray(v)) for (const item of v) headers.append(k, item);
+        else if (v !== undefined) headers.set(k, v);
+      }
+      return new Response(stream, {
+        status: incoming.statusCode ?? 0,
+        statusText: incoming.statusMessage ?? "",
+        headers,
+      });
     },
   };
 }
