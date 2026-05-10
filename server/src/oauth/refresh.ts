@@ -172,10 +172,45 @@ export async function refreshConnection(deps: RefreshDeps): Promise<RefreshResul
     const accessName = `oauth:${row.providerId}:${stableKey}:access`;
     const refreshName = `oauth:${row.providerId}:${stableKey}:refresh`;
 
-    const access = await deps.secretService.upsertSecretByName(row.companyId, {
-      name: accessName,
-      value: parsed.accessToken,
-    });
+    // We've successfully exchanged the refresh token for new tokens at this
+    // point. If persistence fails (DB write, encryption, etc.), the new
+    // tokens are lost and — for providers that rotate refresh tokens on
+    // use — the old refresh token may have been invalidated server-side,
+    // leaving the connection unrecoverable via the worker. Treat this as a
+    // fatal, non-retryable failure: mark the connection `error` with a
+    // distinguishable lastError so operators can spot persistence failures
+    // separately from provider-side errors. We deliberately do NOT bump
+    // refreshAttemptCount — that drives backoff for retryable failures,
+    // and this one is not.
+    let access: { id: string };
+    try {
+      access = await deps.secretService.upsertSecretByName(row.companyId, {
+        name: accessName,
+        value: parsed.accessToken,
+      });
+    } catch (err) {
+      await tx
+        .update(oauthConnections)
+        .set({
+          status: "error",
+          lastError: "token_persistence_failed",
+          lastErrorAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(oauthConnections.id, row.id));
+      oauthLogger.error(
+        {
+          connectionId: row.id,
+          providerId: row.providerId,
+          err: { message: (err as Error).message },
+        },
+        "OAuth token persistence failed after successful exchange — connection requires manual recovery",
+      );
+      return {
+        outcome: "transient",
+        error: (err as Error).message,
+      } as const;
+    }
 
     let refreshSecretId: string = row.refreshTokenSecretId;
     if (parsed.refreshToken) {
@@ -185,11 +220,35 @@ export async function refreshConnection(deps: RefreshDeps): Promise<RefreshResul
           "provider returned refresh_token but rotatesRefreshToken=false; storing defensively",
         );
       }
-      const newRefresh = await deps.secretService.upsertSecretByName(
-        row.companyId,
-        { name: refreshName, value: parsed.refreshToken },
-      );
-      refreshSecretId = newRefresh.id;
+      try {
+        const newRefresh = await deps.secretService.upsertSecretByName(
+          row.companyId,
+          { name: refreshName, value: parsed.refreshToken },
+        );
+        refreshSecretId = newRefresh.id;
+      } catch (err) {
+        await tx
+          .update(oauthConnections)
+          .set({
+            status: "error",
+            lastError: "token_persistence_failed",
+            lastErrorAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(oauthConnections.id, row.id));
+        oauthLogger.error(
+          {
+            connectionId: row.id,
+            providerId: row.providerId,
+            err: { message: (err as Error).message },
+          },
+          "OAuth refresh-token persistence failed after successful exchange — connection requires manual recovery",
+        );
+        return {
+          outcome: "transient",
+          error: (err as Error).message,
+        } as const;
+      }
     }
     const expiresAt = parsed.expiresInSeconds
       ? new Date(Date.now() + parsed.expiresInSeconds * 1000)
