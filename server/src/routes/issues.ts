@@ -3213,6 +3213,7 @@ export function issueRoutes(
     let issueResponse: typeof issue & {
       blockedBy?: unknown;
       blocks?: unknown;
+      activeRecoveryAction?: unknown;
       relatedWork?: Awaited<ReturnType<typeof issueReferencesSvc.listIssueReferenceSummary>>;
       referencedIssueIdentifiers?: string[];
     } = issue;
@@ -3264,6 +3265,25 @@ export function issueRoutes(
       previous.status !== undefined &&
       issue.status === "todo";
     const reopenFromStatus = reopened ? existing.status : null;
+    const statusChangedFromBlockedToTodo =
+      existing.status === "blocked" &&
+      issue.status === "todo" &&
+      (req.body.status !== undefined || reopened);
+    const staleRecoveryAction = statusChangedFromBlockedToTodo
+      ? await recoveryActionsSvc.resolveActiveForIssue({
+          companyId: issue.companyId,
+          sourceIssueId: issue.id,
+          status: "cancelled",
+          outcome: "cancelled",
+          resolutionNote: "Recovery action became stale because the source issue was manually moved from blocked to todo.",
+        })
+      : null;
+    if (staleRecoveryAction) {
+      issueResponse = {
+        ...issueResponse,
+        activeRecoveryAction: null,
+      };
+    }
     await logActivity(db, {
       companyId: issue.companyId,
       actorType: actor.actorType,
@@ -3294,6 +3314,28 @@ export function issueRoutes(
         ),
       },
     });
+
+    if (staleRecoveryAction) {
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "issue.recovery_action_resolved",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          identifier: issue.identifier,
+          recoveryActionId: staleRecoveryAction.id,
+          recoveryActionStatus: staleRecoveryAction.status,
+          outcome: staleRecoveryAction.outcome,
+          sourceIssueStatus: issue.status,
+          resolutionNote: staleRecoveryAction.resolutionNote,
+          source: "manual_status_recovery",
+        },
+      });
+    }
 
     if (existing.status === "in_progress" && issue.status !== existing.status && issue.status !== "in_progress") {
       await listSuccessfulRunHandoffStates(db, issue.companyId, [issue.id])
@@ -3537,10 +3579,6 @@ export function issueRoutes(
       existing.status === "backlog" &&
       issue.status !== "backlog" &&
       req.body.status !== undefined;
-    const statusChangedFromBlockedToTodo =
-      existing.status === "blocked" &&
-      issue.status === "todo" &&
-      (req.body.status !== undefined || reopened);
     const statusChangedFromClosedToTodo =
       isClosedIssueStatus(existing.status) &&
       issue.status === "todo" &&
