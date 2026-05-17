@@ -155,6 +155,32 @@ describe("plugin workspace diff service", () => {
     expect(diff.warnings).toContainEqual(expect.objectContaining({ code: "file_count_truncated" }));
   }, 20_000);
 
+  it("does not follow untracked symlinks outside the repo", async () => {
+    const repoRoot = await createTempRepo();
+    const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-plugin-workspace-diff-secret-"));
+    tempDirs.add(outsideDir);
+    const secretContent = "external secret should not appear\n";
+    const secretPath = path.join(outsideDir, "secret.txt");
+    await fs.writeFile(secretPath, secretContent, "utf8");
+    await fs.symlink(secretPath, path.join(repoRoot, "leak.txt"));
+
+    const diff = await workspaceDiffService().getDiff(createWorkspace(repoRoot), workingTreeQuery());
+    const leak = diff.files.find((file) => file.path === "leak.txt");
+    const serialized = JSON.stringify(diff);
+
+    expect(leak).toMatchObject({ untracked: true, status: "untracked", additions: 0, sizeBytes: null });
+    expect(leak?.patches[0]).toMatchObject({
+      kind: "untracked",
+      patch: null,
+      warnings: [expect.objectContaining({ code: "symlink_target_outside_workspace" })],
+    });
+    expect(diff.warnings).toContainEqual(expect.objectContaining({
+      code: "symlink_target_outside_workspace",
+      path: "leak.txt",
+    }));
+    expect(serialized).not.toContain(secretContent.trim());
+  }, 20_000);
+
   it("surfaces missing cwd, non-git, invalid base refs, and unsafe path filters as plugin errors", async () => {
     const svc = workspaceDiffService();
     await expect(svc.getDiff(createWorkspace(null), workingTreeQuery()))

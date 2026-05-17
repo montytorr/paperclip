@@ -26,6 +26,7 @@ export const workspaceDiffWarningCodeSchema = z.enum([
   "non_git_workspace",
   "patch_truncated",
   "path_filter_invalid",
+  "symlink_target_outside_workspace",
   "workspace_path_invalid",
 ]);
 

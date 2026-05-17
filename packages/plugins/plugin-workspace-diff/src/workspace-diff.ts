@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -26,6 +27,7 @@ export const WORKSPACE_DIFF_CAPS: WorkspaceDiffCaps = {
 
 const GIT_TIMEOUT_MS = 10_000;
 const GIT_LIST_MAX_BUFFER = 2 * 1024 * 1024;
+const OPEN_NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0;
 
 interface GitStatusEntry {
   status: WorkspaceDiffFileStatus;
@@ -301,13 +303,37 @@ async function readNumstat(cwd: string, scopeArgs: string[], filePath: string) {
 }
 
 async function statWorkspaceFile(repoRoot: string, filePath: string) {
-  const target = path.resolve(repoRoot, filePath);
-  if (!isWithinDirectory(target, repoRoot)) return null;
+  const resolved = await resolveWorkspaceFilePath(repoRoot, filePath);
+  if (resolved.status !== "ok") return null;
+  let handle: Awaited<ReturnType<typeof fs.open>>;
   try {
-    const stat = await fs.stat(target);
+    handle = await fs.open(resolved.realPath, fsConstants.O_RDONLY | OPEN_NOFOLLOW);
+  } catch {
+    return null;
+  }
+  try {
+    const stat = await handle.stat();
     return stat.isFile() ? stat.size : null;
   } catch {
     return null;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function resolveWorkspaceFilePath(repoRoot: string, filePath: string): Promise<
+  | { status: "ok"; realPath: string }
+  | { status: "missing" }
+  | { status: "outside_workspace" }
+> {
+  const target = path.resolve(repoRoot, filePath);
+  if (!isWithinDirectory(target, repoRoot)) return { status: "outside_workspace" };
+  try {
+    const realPath = await fs.realpath(target);
+    if (!isWithinDirectory(realPath, repoRoot)) return { status: "outside_workspace" };
+    return { status: "ok", realPath };
+  } catch {
+    return { status: "missing" };
   }
 }
 
@@ -461,8 +487,13 @@ async function buildUntrackedFilePatch(input: {
   budget: PatchBudget;
 }): Promise<WorkspaceDiffFilePatch> {
   const warnings: WorkspaceDiffWarning[] = [];
-  const sizeBytes = await statWorkspaceFile(input.repoRoot, input.filePath);
-  if (sizeBytes === null) {
+  const resolved = await resolveWorkspaceFilePath(input.repoRoot, input.filePath);
+  if (resolved.status === "outside_workspace") {
+    warnings.push(warning(
+      "symlink_target_outside_workspace",
+      "Untracked file resolves outside the workspace and is summarized without reading target bytes.",
+      input.filePath,
+    ));
     return {
       kind: "untracked",
       patch: null,
@@ -474,6 +505,59 @@ async function buildUntrackedFilePatch(input: {
       warnings,
     };
   }
+  if (resolved.status === "missing") {
+    return {
+      kind: "untracked",
+      patch: null,
+      additions: 0,
+      deletions: 0,
+      binary: false,
+      oversized: false,
+      truncated: false,
+      warnings,
+    };
+  }
+
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(resolved.realPath, fsConstants.O_RDONLY | OPEN_NOFOLLOW);
+  } catch {
+    return {
+      kind: "untracked",
+      patch: null,
+      additions: 0,
+      deletions: 0,
+      binary: false,
+      oversized: false,
+      truncated: false,
+      warnings,
+    };
+  }
+
+  let sizeBytes: number;
+  let buffer: Buffer | null = null;
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      return {
+        kind: "untracked",
+        patch: null,
+        additions: 0,
+        deletions: 0,
+        binary: false,
+        oversized: false,
+        truncated: false,
+        warnings,
+      };
+    }
+    sizeBytes = stat.size;
+    if (sizeBytes <= WORKSPACE_DIFF_CAPS.maxFileBytes) {
+      buffer = await handle.readFile();
+    }
+  } finally {
+    await handle.close();
+  }
+
   if (sizeBytes > WORKSPACE_DIFF_CAPS.maxFileBytes) {
     warnings.push(warning("file_oversized", "Untracked file is too large to include a text patch.", input.filePath));
     return {
@@ -488,7 +572,18 @@ async function buildUntrackedFilePatch(input: {
     };
   }
 
-  const buffer = await fs.readFile(path.join(input.repoRoot, input.filePath));
+  if (!buffer) {
+    return {
+      kind: "untracked",
+      patch: null,
+      additions: 0,
+      deletions: 0,
+      binary: false,
+      oversized: false,
+      truncated: false,
+      warnings,
+    };
+  }
   if (isProbablyBinary(buffer)) {
     warnings.push(warning("binary_file", "Binary files are summarized without a text patch.", input.filePath));
     return {
