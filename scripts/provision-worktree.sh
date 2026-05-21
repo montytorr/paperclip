@@ -80,6 +80,56 @@ paperclipai_command_available() {
   return 1
 }
 
+worktree_config_current() {
+  WORKTREE_CONFIG_PATH="$worktree_config_path" \
+  WORKTREE_ENV_PATH="$worktree_env_path" \
+  node <<'EOF'
+const fs = require("node:fs");
+const path = require("node:path");
+
+function parseEnvFile(contents) {
+  const entries = {};
+  for (const rawLine of contents.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const match = rawLine.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+    if (!match) continue;
+    const [, key, rawValue] = match;
+    const value = rawValue.trim();
+    if (!value) {
+      entries[key] = "";
+      continue;
+    }
+    if (
+      (value.startsWith("\"") && value.endsWith("\"")) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      entries[key] = value.slice(1, -1);
+      continue;
+    }
+    entries[key] = value.replace(/\s+#.*$/, "").trim();
+  }
+  return entries;
+}
+
+try {
+  const configPath = process.env.WORKTREE_CONFIG_PATH;
+  const envPath = process.env.WORKTREE_ENV_PATH;
+  if (!configPath || !envPath || !fs.existsSync(configPath) || !fs.existsSync(envPath)) {
+    process.exit(1);
+  }
+  const env = parseEnvFile(fs.readFileSync(envPath, "utf8"));
+  if (!env.PAPERCLIP_CONFIG) process.exit(1);
+  if (path.resolve(env.PAPERCLIP_CONFIG) !== path.resolve(configPath)) {
+    process.exit(1);
+  }
+  process.exit(0);
+} catch {
+  process.exit(1);
+}
+EOF
+}
+
 write_fallback_worktree_config() {
   WORKTREE_NAME="$worktree_name" \
   BASE_CWD="$base_cwd" \
@@ -332,9 +382,12 @@ main().catch((error) => {
 EOF
 }
 
-if [[ -e "$worktree_config_path" && -e "$worktree_env_path" ]]; then
+if [[ -e "$worktree_config_path" && -e "$worktree_env_path" ]] && worktree_config_current; then
   echo "Reusing existing isolated Paperclip worktree config at $worktree_config_path" >&2
 else
+  if [[ -e "$worktree_config_path" || -e "$worktree_env_path" ]]; then
+    echo "Existing isolated Paperclip worktree config is stale; regenerating $worktree_config_path" >&2
+  fi
   if paperclipai_command_available; then
     run_isolated_worktree_init
   else
@@ -366,6 +419,11 @@ if [[ -f "$worktree_cwd/package.json" && -f "$worktree_cwd/pnpm-lock.yaml" ]]; t
       break
     fi
   done < <(list_base_node_modules_paths)
+
+  if [[ "$needs_install" -eq 0 && ! -x "$worktree_cwd/server/node_modules/.bin/tsx" ]]; then
+    echo "Worktree node_modules are missing dev runner dependencies; reinstalling with devDependencies." >&2
+    needs_install=1
+  fi
 
   if [[ "$needs_install" -eq 1 ]]; then
     backup_suffix=".paperclip-backup-${BASHPID:-$$}"
@@ -411,7 +469,7 @@ if [[ -f "$worktree_cwd/package.json" && -f "$worktree_cwd/pnpm-lock.yaml" ]]; t
 
       if (
         cd "$worktree_cwd"
-        pnpm install "$@"
+        CI=true NODE_ENV=development pnpm install "$@"
       ) >"$stdout_path" 2>"$stderr_path"; then
         cat "$stdout_path"
         cat "$stderr_path" >&2
