@@ -57,6 +57,7 @@ export type BriefsRunInput = {
   id: string;
   companyId: string;
   issueId: string | null;
+  agentId?: string | null;
   status: string;
   error?: string | null;
   startedAt?: Date | string | null;
@@ -221,7 +222,8 @@ export function slugifyBriefGrouping(value: string): string {
 }
 
 function issueHref(issue: Pick<BriefsIssueInput, "id" | "identifier">): string {
-  return `/PAP/issues/${issue.identifier ?? issue.id}`;
+  const prefix = companyPrefixFromIdentifier(issue.identifier) ?? "PAP";
+  return `/${prefix}/issues/${issue.identifier ?? issue.id}`;
 }
 
 function sourceIssue(bundle: BriefsSourceBundle, issueId: string | null | undefined): BriefsIssueInput | null {
@@ -229,14 +231,32 @@ function sourceIssue(bundle: BriefsSourceBundle, issueId: string | null | undefi
   return bundle.issues.find((issue) => issue.id === issueId) ?? null;
 }
 
-function sourceLink(bundle: BriefsSourceBundle, kind: string, sourceId: string, issueId: string | null, key?: string): string {
+function companyPrefixFromIdentifier(identifier: string | null | undefined): string | null {
+  return identifier?.match(/^([A-Z][A-Z0-9]*)-\d+$/)?.[1] ?? null;
+}
+
+function companyPrefixForBundle(bundle: BriefsSourceBundle): string {
+  return bundle.issues.map((issue) => companyPrefixFromIdentifier(issue.identifier)).find(Boolean) ?? "PAP";
+}
+
+function sourceLink(
+  bundle: BriefsSourceBundle,
+  kind: string,
+  sourceId: string,
+  issueId: string | null,
+  key?: string,
+  agentId?: string | null,
+): string {
   const issue = sourceIssue(bundle, issueId);
-  if (kind === "run") return `/PAP/runs/${sourceId}`;
-  if (!issue) return `/PAP/issues/${issueId ?? sourceId}`;
+  const prefix = issue ? companyPrefixFromIdentifier(issue.identifier) ?? companyPrefixForBundle(bundle) : companyPrefixForBundle(bundle);
+  if (kind === "run") {
+    return agentId ? `/${prefix}/agents/${agentId}/runs/${sourceId}` : issue ? issueHref(issue) : `/${prefix}/issues/${issueId ?? sourceId}`;
+  }
+  if (!issue) return `/${prefix}/issues/${issueId ?? sourceId}`;
   if (kind === "comment") return `${issueHref(issue)}#comment-${sourceId}`;
   if (kind === "document") return `${issueHref(issue)}#document-${key ?? sourceId}`;
   if (kind === "interaction") return `${issueHref(issue)}#interaction-${sourceId}`;
-  if (kind === "approval") return `/PAP/approvals/${sourceId}`;
+  if (kind === "approval") return `/${prefix}/approvals/${sourceId}`;
   if (kind === "work_product") return `${issueHref(issue)}#work-product-${sourceId}`;
   return issueHref(issue);
 }
@@ -489,7 +509,7 @@ function buildSources(bundle: BriefsSourceBundle, cardId: string, idFactory: () 
       identifier: issue?.identifier ?? null,
       titleLine: truncate(issue ? `Run for ${issue.title}` : "Heartbeat run", 160),
       rightTag: ["failed", "error"].includes(run.status) ? "failed" : run.status,
-      linkPath: sourceLink(bundle, "run", run.id, run.issueId),
+      linkPath: sourceLink(bundle, "run", run.id, run.issueId, undefined, run.agentId),
       isIntraTreeBlocked: null,
       eventAt: toIso(runEventTime(run) || Date.now()),
       metadata: { error: run.error ?? null },
@@ -710,8 +730,7 @@ export function isBriefTreeRelevantToUser(bundle: BriefsSourceBundle): boolean {
     || (bundle.comments ?? []).some((comment) => comment.authorUserId === bundle.userId)
     || (bundle.documents ?? []).some((document) => document.createdByUserId === bundle.userId || document.updatedByUserId === bundle.userId)
     || (bundle.interactions ?? []).some((interaction) => interaction.targetUserId === bundle.userId)
-    || (bundle.approvals ?? []).some((approval) => approval.reviewerUserId === bundle.userId || approval.decidedByUserId === bundle.userId)
-    || bundle.issues.some((issue) => Boolean(issue.assigneeAgentId && bundle.relevantAgentIds?.includes(issue.assigneeAgentId)));
+    || (bundle.approvals ?? []).some((approval) => approval.reviewerUserId === bundle.userId || approval.decidedByUserId === bundle.userId);
 }
 
 export function selectRelevantBriefTrees(input: {

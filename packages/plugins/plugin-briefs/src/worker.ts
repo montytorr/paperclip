@@ -167,6 +167,7 @@ function runToBriefRun(run: BriefsRunInput | Awaited<ReturnType<PluginContext["i
     id: run.id,
     companyId: "companyId" in run ? run.companyId : "",
     issueId: run.issueId,
+    agentId: "agentId" in run ? run.agentId : null,
     status: run.status,
     error: run.error ?? null,
     startedAt: run.startedAt ?? null,

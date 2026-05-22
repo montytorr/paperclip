@@ -104,6 +104,28 @@ describe("deterministic Briefs cards", () => {
     })).toEqual([relevant]);
   });
 
+  it("does not treat unrelated assignee summaries as user relevance", () => {
+    const unrelatedAssignedTree = bundle({
+      rootIssueId: "other-root",
+      issues: [issue({
+        id: "other-root",
+        identifier: "PAP-10",
+        createdByUserId: "someone-else",
+        updatedAt: "2026-05-22T10:00:00.000Z",
+        assigneeAgentId: "agent-1",
+      })],
+      relevantAgentIds: ["agent-1"],
+    });
+
+    expect(isBriefTreeRelevantToUser(unrelatedAssignedTree)).toBe(false);
+    expect(selectRelevantBriefTrees({
+      companyId,
+      userId,
+      candidateTrees: [unrelatedAssignedTree],
+      now,
+    })).toEqual([]);
+  });
+
   it("does not promote intra-tree sequencing blockers to card-level blocked", () => {
     const child = issue({
       id: "issue-child",
@@ -128,6 +150,31 @@ describe("deterministic Briefs cards", () => {
       rightTag: "blocked",
       isIntraTreeBlocked: true,
     });
+  });
+
+  it("builds company-prefixed source links and valid run routes", () => {
+    const card = buildDeterministicBriefCard(bundle({
+      rootIssueId: "issue-root",
+      issues: [issue({
+        identifier: "ACME-42",
+        updatedAt: "2026-05-22T10:00:00.000Z",
+      })],
+      runs: [{
+        id: "run-1",
+        companyId,
+        issueId: "issue-root",
+        agentId: "agent-1",
+        status: "failed",
+        error: "Timed out",
+        createdAt: "2026-05-22T11:00:00.000Z",
+      }],
+    }), { now, idFactory: ids() });
+
+    const issueSource = card.sources.find((source) => source.sourceKind === "issue");
+    const runSource = card.sources.find((source) => source.sourceKind === "run");
+
+    expect(issueSource?.linkPath).toBe("/ACME/issues/ACME-42");
+    expect(runSource?.linkPath).toBe("/ACME/agents/agent-1/runs/run-1");
   });
 
   it("gives out-of-tree blockers precedence over waiting and live signals", () => {
