@@ -4294,7 +4294,7 @@ export function issueRoutes(
         normalizeIssueExecutionPolicy(child.executionPolicy),
         actor.actorType,
       );
-      assertCanManageIssueMonitor(req, child.assigneeAgentId ?? null, Boolean(executionPolicy?.monitor));
+      assertCanManageIssueMonitor(access, req, sourceIssue.companyId, child.assigneeAgentId ?? null, Boolean(executionPolicy?.monitor));
       return {
         ...child,
         executionPolicy,
