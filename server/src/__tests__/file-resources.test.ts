@@ -32,21 +32,30 @@ type TestGraph = {
   issueId: string;
   otherIssueId: string;
   projectId: string;
+  projectWorkspaceId: string;
+  targetProjectId: string;
+  targetProjectWorkspaceId: string;
+  otherProjectId: string;
+  otherProjectWorkspaceId: string;
   workspaceRoot: string;
+  targetWorkspaceRoot: string;
   executionRoot: string;
 };
 
 async function makeWorkspace() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-file-resources-"));
   const projectRoot = path.join(root, "project");
+  const targetProjectRoot = path.join(root, "target-project");
   const executionRoot = path.join(root, "execution");
   await fs.mkdir(projectRoot, { recursive: true });
+  await fs.mkdir(targetProjectRoot, { recursive: true });
   await fs.mkdir(executionRoot, { recursive: true });
-  return { root, projectRoot, executionRoot };
+  return { root, projectRoot, targetProjectRoot, executionRoot };
 }
 
 async function seedGraph(db: Db, input: {
   projectRoot: string;
+  targetProjectRoot?: string;
   executionRoot?: string | null;
   projectSourceType?: string;
 }): Promise<TestGraph> {
@@ -56,8 +65,10 @@ async function seedGraph(db: Db, input: {
   const goalId = crypto.randomUUID();
   const otherGoalId = crypto.randomUUID();
   const projectId = crypto.randomUUID();
+  const targetProjectId = crypto.randomUUID();
   const otherProjectId = crypto.randomUUID();
   const projectWorkspaceId = crypto.randomUUID();
+  const targetProjectWorkspaceId = crypto.randomUUID();
   const otherProjectWorkspaceId = crypto.randomUUID();
   const executionWorkspaceId = crypto.randomUUID();
   const issueId = crypto.randomUUID();
@@ -73,6 +84,7 @@ async function seedGraph(db: Db, input: {
   ]);
   await db.insert(projects).values([
     { id: projectId, companyId, goalId, name: "Project", status: "in_progress" },
+    { id: targetProjectId, companyId, goalId, name: "Target project", status: "in_progress" },
     { id: otherProjectId, companyId: otherCompanyId, goalId: otherGoalId, name: "Other project", status: "in_progress" },
   ]);
   await db.insert(projectWorkspaces).values([
@@ -92,6 +104,15 @@ async function seedGraph(db: Db, input: {
       name: "Other workspace",
       sourceType: "local_path",
       cwd: input.projectRoot,
+      isPrimary: true,
+    },
+    {
+      id: targetProjectWorkspaceId,
+      companyId,
+      projectId: targetProjectId,
+      name: "Target workspace",
+      sourceType: "local_path",
+      cwd: input.targetProjectRoot ?? input.projectRoot,
       isPrimary: true,
     },
   ]);
@@ -139,7 +160,13 @@ async function seedGraph(db: Db, input: {
     issueId,
     otherIssueId,
     projectId,
+    projectWorkspaceId,
+    targetProjectId,
+    targetProjectWorkspaceId,
+    otherProjectId,
+    otherProjectWorkspaceId,
     workspaceRoot: input.projectRoot,
+    targetWorkspaceRoot: input.targetProjectRoot ?? input.projectRoot,
     executionRoot: input.executionRoot ?? input.projectRoot,
   };
 }
@@ -213,6 +240,120 @@ describeEmbeddedPostgres("workspace file resources", () => {
     expect(resolved.workspaceKind).toBe("project_workspace");
     expect(resolved.displayPath).toBe("README.md");
     expect(resolved.capabilities.preview).toBe(true);
+  });
+
+  it("resolves explicit same-company cross-project workspace files and logs target details", async () => {
+    const { root, projectRoot, targetProjectRoot, executionRoot } = await makeWorkspace();
+    const graph = await seedGraph(db, { projectRoot, targetProjectRoot, executionRoot });
+    await fs.mkdir(path.join(targetProjectRoot, "docs"), { recursive: true });
+    await fs.writeFile(path.join(targetProjectRoot, "docs", "README.md"), "# Target project\n", "utf8");
+
+    const app = createApp(db, {
+      type: "board",
+      userId: "board-user",
+      companyIds: [graph.companyId],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+    const res = await request(app)
+      .get(`/api/issues/${graph.issueId}/file-resources/content`)
+      .query({
+        projectId: graph.targetProjectId,
+        workspaceId: graph.targetProjectWorkspaceId,
+        path: "docs/README.md",
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.resource).toMatchObject({
+      workspaceKind: "project_workspace",
+      workspaceId: graph.targetProjectWorkspaceId,
+      projectId: graph.targetProjectId,
+      projectName: "Target project",
+      displayPath: "Target project / docs/README.md",
+    });
+    expect(res.body.content.data).toContain("# Target project");
+    expect(JSON.stringify(res.body)).not.toContain(root);
+
+    const rows = await db.select().from(activityLog).where(eq(activityLog.entityId, graph.issueId));
+    const read = rows.find((row) => row.action === "issue.file_resource_content_read");
+    expect(read?.details).toMatchObject({
+      outcome: "success",
+      workspaceId: graph.targetProjectWorkspaceId,
+      projectId: graph.targetProjectId,
+      projectName: "Target project",
+      displayPath: "Target project / docs/README.md",
+    });
+    expect(JSON.stringify(read?.details)).not.toContain(targetProjectRoot);
+  });
+
+  it("denies explicit cross-company project workspaces", async () => {
+    const { projectRoot, targetProjectRoot, executionRoot } = await makeWorkspace();
+    const graph = await seedGraph(db, { projectRoot, targetProjectRoot, executionRoot });
+    const app = createApp(db, {
+      type: "board",
+      userId: "board-user",
+      companyIds: [graph.companyId],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .get(`/api/issues/${graph.issueId}/file-resources/resolve`)
+      .query({
+        projectId: graph.otherProjectId,
+        workspaceId: graph.otherProjectWorkspaceId,
+        path: "README.md",
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body?.details?.code).toBe("cross_company_workspace");
+    const rows = await db.select().from(activityLog).where(eq(activityLog.entityId, graph.issueId));
+    const denied = rows.find((row) => row.action === "issue.file_resource_resolve_denied");
+    expect(denied?.details).toMatchObject({
+      outcome: "denied",
+      projectId: graph.otherProjectId,
+      workspaceId: graph.otherProjectWorkspaceId,
+      denialReason: "cross_company_workspace",
+    });
+  });
+
+  it("rejects explicit project/workspace mismatches", async () => {
+    const { projectRoot, targetProjectRoot, executionRoot } = await makeWorkspace();
+    const graph = await seedGraph(db, { projectRoot, targetProjectRoot, executionRoot });
+    const app = createApp(db, {
+      type: "board",
+      userId: "board-user",
+      companyIds: [graph.companyId],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .get(`/api/issues/${graph.issueId}/file-resources/resolve`)
+      .query({
+        projectId: graph.targetProjectId,
+        workspaceId: graph.projectWorkspaceId,
+        path: "README.md",
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body?.details?.code).toBe("workspace_project_mismatch");
+  });
+
+  it("blocks symlink escapes from explicit cross-project workspaces", async () => {
+    const { root, projectRoot, targetProjectRoot, executionRoot } = await makeWorkspace();
+    const graph = await seedGraph(db, { projectRoot, targetProjectRoot, executionRoot });
+    await fs.writeFile(path.join(root, "outside-target.txt"), "secret\n", "utf8");
+    await fs.symlink(path.join(root, "outside-target.txt"), path.join(targetProjectRoot, "escape.txt"));
+
+    await expect(workspaceFileResourceService(db).readContent(graph.issueId, {
+      projectId: graph.targetProjectId,
+      workspaceId: graph.targetProjectWorkspaceId,
+      path: "escape.txt",
+    })).rejects.toMatchObject({
+      status: 403,
+      details: { code: "outside_workspace" },
+    });
   });
 
   it("resolves and reads video workspace files as base64 previews", async () => {

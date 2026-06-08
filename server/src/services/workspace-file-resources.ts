@@ -4,7 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { executionWorkspaces, issues, projectWorkspaces } from "@paperclipai/db";
+import { executionWorkspaces, issues, projects, projectWorkspaces } from "@paperclipai/db";
 import type {
   ResolvedWorkspaceResource,
   WorkspaceFileContent,
@@ -101,6 +101,8 @@ type ProjectWorkspaceRow = typeof projectWorkspaces.$inferSelect;
 type WorkspaceCandidate = {
   workspaceKind: WorkspaceFileWorkspaceKind;
   workspaceId: string;
+  projectId?: string | null;
+  projectName?: string | null;
   provider: string;
   label: string;
   rootPath: string | null;
@@ -119,9 +121,16 @@ type LocalResolvedFile = {
 
 type WorkspaceFileListQueryInput = {
   workspace?: WorkspaceFileSelector | null;
+  projectId?: string | null;
+  workspaceId?: string | null;
   mode?: WorkspaceFileListMode | null;
   q?: string | null;
   limit?: number | null;
+};
+
+type WorkspaceTargetInput = {
+  projectId?: string | null;
+  workspaceId?: string | null;
 };
 
 function previewCapForKind(kind: WorkspaceFilePreviewKind) {
@@ -226,10 +235,12 @@ function listItemFromStat(input: {
     provider: input.candidate.provider,
     title: path.posix.basename(input.relativePath),
     relativePath: input.relativePath,
-    displayPath: input.relativePath,
+    displayPath: input.candidate.projectName ? `${input.candidate.projectName} / ${input.relativePath}` : input.relativePath,
     workspaceLabel: input.candidate.label,
     workspaceKind: input.candidate.workspaceKind,
     workspaceId: input.candidate.workspaceId,
+    projectId: input.candidate.projectId ?? null,
+    projectName: input.candidate.projectName ?? null,
     contentType: contentType ?? (previewKind === "text" ? "text/plain; charset=utf-8" : "application/octet-stream"),
     byteSize: input.stat.size,
     modifiedAt: input.stat.mtime.toISOString(),
@@ -268,10 +279,12 @@ function remoteResource(candidate: WorkspaceCandidate, relativePath: string): Re
     kind: "remote_resource",
     provider: candidate.provider || "remote_managed",
     title: path.posix.basename(relativePath),
-    displayPath: relativePath,
+    displayPath: candidate.projectName ? `${candidate.projectName} / ${relativePath}` : relativePath,
     workspaceLabel: candidate.label,
     workspaceKind: candidate.workspaceKind,
     workspaceId: candidate.workspaceId,
+    projectId: candidate.projectId ?? null,
+    projectName: candidate.projectName ?? null,
     contentType: null,
     byteSize: null,
     previewKind: "unsupported",
@@ -298,13 +311,18 @@ function candidateFromExecutionWorkspace(row: ExecutionWorkspaceRow): WorkspaceC
   };
 }
 
-function candidateFromProjectWorkspace(row: ProjectWorkspaceRow): WorkspaceCandidate {
+function candidateFromProjectWorkspace(
+  row: ProjectWorkspaceRow,
+  project?: { id: string; name: string } | null,
+): WorkspaceCandidate {
   const provider = row.sourceType === "git_worktree" ? "git_worktree" : row.sourceType === "local_path" ? "local_fs" : row.sourceType;
   const rootPath = row.cwd ?? null;
   const remote = !["local_fs", "git_worktree"].includes(provider) || !rootPath;
   return {
     workspaceKind: "project_workspace",
     workspaceId: row.id,
+    projectId: project?.id ?? row.projectId,
+    projectName: project?.name ?? null,
     provider,
     label: row.name,
     rootPath,
@@ -361,10 +379,12 @@ async function statLocalCandidate(candidate: WorkspaceCandidate, normalized: Nor
       kind: "file",
       provider: candidate.provider,
       title: path.posix.basename(normalized.relativePath),
-      displayPath: normalized.relativePath,
+      displayPath: candidate.projectName ? `${candidate.projectName} / ${normalized.relativePath}` : normalized.relativePath,
       workspaceLabel: candidate.label,
       workspaceKind: candidate.workspaceKind,
       workspaceId: candidate.workspaceId,
+      projectId: candidate.projectId ?? null,
+      projectName: candidate.projectName ?? null,
       contentType: contentType ?? (previewKind === "text" ? "text/plain; charset=utf-8" : "application/octet-stream"),
       byteSize: stat.size,
       previewKind,
@@ -413,6 +433,8 @@ function unavailableFileList(input: {
           workspaceLabel: input.candidate.label,
           workspaceKind: input.candidate.workspaceKind,
           workspaceId: input.candidate.workspaceId,
+          projectId: input.candidate.projectId ?? null,
+          projectName: input.candidate.projectName ?? null,
         }
       : null,
     query: {
@@ -445,6 +467,8 @@ function availableFileList(input: {
       workspaceLabel: input.candidate.label,
       workspaceKind: input.candidate.workspaceKind,
       workspaceId: input.candidate.workspaceId,
+      projectId: input.candidate.projectId ?? null,
+      projectName: input.candidate.projectName ?? null,
     },
     query: {
       workspace: input.selector,
@@ -637,7 +661,38 @@ export function workspaceFileResourceService(db: Db) {
     return issue;
   }
 
-  async function listCandidates(issue: IssueRow, selector: WorkspaceFileSelector): Promise<WorkspaceCandidate[]> {
+  async function targetProjectWorkspaceCandidate(
+    issue: IssueRow,
+    target: WorkspaceTargetInput,
+  ): Promise<WorkspaceCandidate | null> {
+    const projectId = target.projectId ?? null;
+    const workspaceId = target.workspaceId ?? null;
+    if (!projectId && !workspaceId) return null;
+    if (!projectId || !workspaceId) {
+      throw unprocessable("Workspace file target requires both projectId and workspaceId", { code: "invalid_target" });
+    }
+
+    const [project] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
+    const [workspace] = await db.select().from(projectWorkspaces).where(eq(projectWorkspaces.id, workspaceId)).limit(1);
+    if (!project || !workspace) throw notFound("Project workspace not found");
+    if (project.companyId !== issue.companyId || workspace.companyId !== issue.companyId) {
+      throw new HttpError(403, "Project workspace belongs to another company", { code: "cross_company_workspace" });
+    }
+    if (workspace.projectId !== project.id) {
+      throw unprocessable("Workspace does not belong to the selected project", { code: "workspace_project_mismatch" });
+    }
+
+    return candidateFromProjectWorkspace(workspace, { id: project.id, name: project.name });
+  }
+
+  async function listCandidates(
+    issue: IssueRow,
+    selector: WorkspaceFileSelector,
+    target: WorkspaceTargetInput = {},
+  ): Promise<WorkspaceCandidate[]> {
+    const explicitTarget = await targetProjectWorkspaceCandidate(issue, target);
+    if (explicitTarget) return [explicitTarget];
+
     const candidates: WorkspaceCandidate[] = [];
     if ((selector === "auto" || selector === "execution") && issue.projectId) {
       const executionIds = [issue.executionWorkspaceId].filter((id): id is string => Boolean(id));
@@ -700,11 +755,14 @@ export function workspaceFileResourceService(db: Db) {
   async function resolve(issueId: string, input: {
     path: string;
     workspace?: WorkspaceFileSelector | null;
+    projectId?: string | null;
+    workspaceId?: string | null;
   }, opts: { issue?: IssueRow } = {}): Promise<ResolvedWorkspaceResource> {
     const issue = opts.issue ?? await getIssue(issueId);
     const selector = input.workspace ?? "auto";
+    const explicitTarget = Boolean(input.projectId || input.workspaceId);
     const normalized = normalizeWorkspaceRelativePath(input.path);
-    const candidates = await listCandidates(issue, selector);
+    const candidates = await listCandidates(issue, selector, input);
     if (candidates.length === 0) {
       throw unprocessable("No workspace is available for this issue", { code: "no_workspace" });
     }
@@ -712,13 +770,19 @@ export function workspaceFileResourceService(db: Db) {
     let lastNotFound: unknown = null;
     for (const candidate of candidates) {
       if (candidate.remote) {
-        if (selector !== "auto") return remoteResource(candidate, normalized.relativePath);
+        if (explicitTarget || selector !== "auto") return remoteResource(candidate, normalized.relativePath);
         continue;
       }
       try {
         return (await statLocalCandidate(candidate, normalized)).resource;
       } catch (error) {
-        if (error instanceof Error && "status" in error && (error as { status?: number }).status === 404 && selector === "auto") {
+        if (
+          !explicitTarget &&
+          error instanceof Error &&
+          "status" in error &&
+          (error as { status?: number }).status === 404 &&
+          selector === "auto"
+        ) {
           lastNotFound = error;
           continue;
         }
@@ -737,6 +801,7 @@ export function workspaceFileResourceService(db: Db) {
   ): Promise<WorkspaceFileListResponse> {
     const issue = opts.issue ?? await getIssue(issueId);
     const selector = input.workspace ?? "auto";
+    const explicitTarget = Boolean(input.projectId || input.workspaceId);
     const mode = input.mode ?? "all";
     const limit = Math.min(
       WORKSPACE_FILE_LIST_MAX_LIMIT,
@@ -744,7 +809,7 @@ export function workspaceFileResourceService(db: Db) {
     );
     const q = input.q?.trim() || null;
     const normalizedQuery = q?.toLowerCase() ?? null;
-    const candidates = await listCandidates(issue, selector);
+    const candidates = await listCandidates(issue, selector, input);
     if (candidates.length === 0) {
       return unavailableFileList({ selector, mode, q, limit, reason: "no_workspace" });
     }
@@ -753,7 +818,7 @@ export function workspaceFileResourceService(db: Db) {
     for (const candidate of candidates) {
       if (candidate.remote) {
         firstUnavailable ??= { candidate, reason: "remote_workspace" };
-        if (selector !== "auto") {
+        if (explicitTarget || selector !== "auto") {
           return unavailableFileList({ selector, mode, q, limit, candidate, reason: "remote_workspace" });
         }
         continue;
@@ -764,7 +829,7 @@ export function workspaceFileResourceService(db: Db) {
         rootReal = await fs.realpath(candidate.rootPath!);
       } catch {
         firstUnavailable ??= { candidate, reason: "workspace_unavailable" };
-        if (selector !== "auto") {
+        if (explicitTarget || selector !== "auto") {
           return unavailableFileList({ selector, mode, q, limit, candidate, reason: "workspace_unavailable" });
         }
         continue;
@@ -775,7 +840,7 @@ export function workspaceFileResourceService(db: Db) {
         if ("unavailableReason" in changed) {
           const reason = changed.unavailableReason ?? "changed_unavailable";
           firstUnavailable ??= { candidate, reason };
-          if (selector !== "auto") {
+          if (explicitTarget || selector !== "auto") {
             return unavailableFileList({ selector, mode, q, limit, candidate, reason });
           }
           continue;
@@ -824,11 +889,14 @@ export function workspaceFileResourceService(db: Db) {
   async function readContent(issueId: string, input: {
     path: string;
     workspace?: WorkspaceFileSelector | null;
+    projectId?: string | null;
+    workspaceId?: string | null;
   }, opts: { issue?: IssueRow } = {}): Promise<WorkspaceFileContent> {
     const issue = opts.issue ?? await getIssue(issueId);
     const selector = input.workspace ?? "auto";
+    const explicitTarget = Boolean(input.projectId || input.workspaceId);
     const normalized = normalizeWorkspaceRelativePath(input.path);
-    const candidates = await listCandidates(issue, selector);
+    const candidates = await listCandidates(issue, selector, input);
     if (candidates.length === 0) {
       throw unprocessable("No workspace is available for this issue", { code: "no_workspace" });
     }
@@ -836,14 +904,22 @@ export function workspaceFileResourceService(db: Db) {
     let lastNotFound: unknown = null;
     for (const candidate of candidates) {
       if (candidate.remote) {
-        if (selector !== "auto") throw unprocessable("Remote workspaces cannot be previewed by the server", { code: "remote_workspace" });
+        if (explicitTarget || selector !== "auto") {
+          throw unprocessable("Remote workspaces cannot be previewed by the server", { code: "remote_workspace" });
+        }
         continue;
       }
       let resolved: LocalResolvedFile;
       try {
         resolved = await statLocalCandidate(candidate, normalized);
       } catch (error) {
-        if (error instanceof Error && "status" in error && (error as { status?: number }).status === 404 && selector === "auto") {
+        if (
+          !explicitTarget &&
+          error instanceof Error &&
+          "status" in error &&
+          (error as { status?: number }).status === 404 &&
+          selector === "auto"
+        ) {
           lastNotFound = error;
           continue;
         }

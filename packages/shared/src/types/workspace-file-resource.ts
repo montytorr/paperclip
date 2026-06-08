@@ -7,7 +7,9 @@ export type WorkspaceFileContentEncoding = "utf8" | "base64";
 
 export interface WorkspaceFileRef {
   kind: "workspace_file";
-  issueId: string;
+  issueId?: string;
+  projectId?: string;
+  projectName?: string;
   workspaceKind: WorkspaceFileWorkspaceKind;
   workspaceId: string;
   relativePath: string;
@@ -24,6 +26,8 @@ export interface ResolvedWorkspaceResource {
   workspaceLabel: string;
   workspaceKind: WorkspaceFileWorkspaceKind;
   workspaceId: string;
+  projectId?: string | null;
+  projectName?: string | null;
   contentType?: string | null;
   byteSize?: number | null;
   previewKind: WorkspaceFilePreviewKind;
@@ -52,6 +56,8 @@ export interface WorkspaceFileListItem {
   workspaceLabel: string;
   workspaceKind: WorkspaceFileWorkspaceKind;
   workspaceId: string;
+  projectId?: string | null;
+  projectName?: string | null;
   contentType?: string | null;
   byteSize?: number | null;
   modifiedAt?: string | null;
@@ -72,6 +78,8 @@ export interface WorkspaceFileListResponse {
     workspaceLabel: string;
     workspaceKind: WorkspaceFileWorkspaceKind;
     workspaceId: string;
+    projectId?: string | null;
+    projectName?: string | null;
   } | null;
   query: {
     workspace: WorkspaceFileSelector;

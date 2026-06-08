@@ -14,7 +14,9 @@ export const workspaceFileResourceKindSchema = z.enum(["file", "remote_resource"
 
 export const workspaceFileRefSchema = z.object({
   kind: z.literal("workspace_file"),
-  issueId: z.string().uuid(),
+  issueId: z.string().uuid().optional(),
+  projectId: z.string().uuid().optional(),
+  projectName: z.string().min(1).optional(),
   workspaceKind: workspaceFileWorkspaceKindSchema,
   workspaceId: z.string().uuid(),
   relativePath: z.string().min(1),
@@ -24,6 +26,8 @@ export const workspaceFileRefSchema = z.object({
 });
 
 export const workspaceFileResourceQuerySchema = z.object({
+  projectId: z.string().uuid().optional(),
+  workspaceId: z.string().uuid().optional(),
   path: z
     .string()
     .min(1)
@@ -32,9 +36,15 @@ export const workspaceFileResourceQuerySchema = z.object({
       params: { code: "invalid_path" },
     }),
   workspace: workspaceFileSelectorSchema.optional(),
+}).refine((value) => Boolean(value.projectId) === Boolean(value.workspaceId), {
+  message: "Workspace file target requires both projectId and workspaceId",
+  path: ["workspaceId"],
+  params: { code: "invalid_target" },
 });
 
 export const workspaceFileListQuerySchema = z.object({
+  projectId: z.string().uuid().optional(),
+  workspaceId: z.string().uuid().optional(),
   workspace: workspaceFileSelectorSchema.optional(),
   mode: workspaceFileListModeSchema.optional(),
   q: z
@@ -49,6 +59,10 @@ export const workspaceFileListQuerySchema = z.object({
     })
     .optional(),
   limit: z.coerce.number().int().min(1).max(100).default(25),
+}).refine((value) => Boolean(value.projectId) === Boolean(value.workspaceId), {
+  message: "Workspace file target requires both projectId and workspaceId",
+  path: ["workspaceId"],
+  params: { code: "invalid_target" },
 });
 
 export const resolvedWorkspaceResourceSchema = z.object({
@@ -59,6 +73,8 @@ export const resolvedWorkspaceResourceSchema = z.object({
   workspaceLabel: z.string().min(1),
   workspaceKind: workspaceFileWorkspaceKindSchema,
   workspaceId: z.string().uuid(),
+  projectId: z.string().uuid().nullable().optional(),
+  projectName: z.string().min(1).nullable().optional(),
   contentType: z.string().nullable().optional(),
   byteSize: z.number().int().nonnegative().nullable().optional(),
   previewKind: workspaceFilePreviewKindSchema,

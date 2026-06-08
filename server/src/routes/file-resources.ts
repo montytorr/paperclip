@@ -17,18 +17,20 @@ export type WorkspaceFileResourceService = {
   getIssue(issueId: string): Promise<{ companyId: string }>;
   list(issueId: string, input: {
     workspace?: "auto" | "execution" | "project" | null;
+    projectId?: string | null;
+    workspaceId?: string | null;
     mode?: "all" | "recent" | "changed" | null;
     q?: string | null;
     limit?: number | null;
   }, opts?: { issue?: Awaited<ReturnType<WorkspaceFileResourceService["getIssue"]>> }): Promise<WorkspaceFileListResponse>;
   resolve(
     issueId: string,
-    input: { path: string; workspace?: "auto" | "execution" | "project" | null },
+    input: { path: string; workspace?: "auto" | "execution" | "project" | null; projectId?: string | null; workspaceId?: string | null },
     opts?: { issue?: Awaited<ReturnType<WorkspaceFileResourceService["getIssue"]>> },
   ): Promise<ResolvedWorkspaceResource>;
   readContent(
     issueId: string,
-    input: { path: string; workspace?: "auto" | "execution" | "project" | null },
+    input: { path: string; workspace?: "auto" | "execution" | "project" | null; projectId?: string | null; workspaceId?: string | null },
     opts?: { issue?: Awaited<ReturnType<WorkspaceFileResourceService["getIssue"]>> },
   ): Promise<WorkspaceFileContent>;
 };
@@ -106,16 +108,20 @@ function readQuery(query: unknown) {
     parsed = workspaceFileResourceQuerySchema.parse(query);
   } catch (error) {
     if (error instanceof ZodError) {
-      const refinement = error.errors.find(
-        (issue) => (issue as { params?: { code?: string } }).params?.code === "invalid_path",
-      );
-      if (refinement) throw unprocessable(refinement.message, { code: "invalid_path" });
+      const refinement = error.errors.find((issue) => {
+        const code = (issue as { params?: { code?: string } }).params?.code;
+        return code === "invalid_path" || code === "invalid_target";
+      });
+      const code = (refinement as { params?: { code?: string } } | undefined)?.params?.code;
+      if (refinement) throw unprocessable(refinement.message, { code: code ?? "invalid_path" });
     }
     throw error;
   }
   return {
     path: parsed.path,
     workspace: parsed.workspace ?? "auto",
+    projectId: parsed.projectId ?? null,
+    workspaceId: parsed.workspaceId ?? null,
   };
 }
 
@@ -125,16 +131,20 @@ function readListQuery(query: unknown) {
     parsed = workspaceFileListQuerySchema.parse(query);
   } catch (error) {
     if (error instanceof ZodError) {
-      const refinement = error.errors.find(
-        (issue) => (issue as { params?: { code?: string } }).params?.code === "invalid_query",
-      );
-      if (refinement) throw unprocessable(refinement.message, { code: "invalid_query" });
+      const refinement = error.errors.find((issue) => {
+        const code = (issue as { params?: { code?: string } }).params?.code;
+        return code === "invalid_query" || code === "invalid_target";
+      });
+      const code = (refinement as { params?: { code?: string } } | undefined)?.params?.code;
+      if (refinement) throw unprocessable(refinement.message, { code: code ?? "invalid_query" });
       throw unprocessable("Workspace file list query is invalid", { code: "invalid_query" });
     }
     throw error;
   }
   return {
     workspace: parsed.workspace ?? "auto",
+    projectId: parsed.projectId ?? null,
+    workspaceId: parsed.workspaceId ?? null,
     mode: parsed.mode ?? "all",
     q: parsed.q?.trim() || null,
     limit: parsed.limit,
@@ -145,6 +155,8 @@ function activityDetails(input: {
   outcome: "success" | "denied" | "unavailable";
   workspaceKind?: string | null;
   workspaceId?: string | null;
+  projectId?: string | null;
+  projectName?: string | null;
   displayPath?: string | null;
   denialReason?: string | null;
   byteSize?: number | null;
@@ -154,6 +166,8 @@ function activityDetails(input: {
     outcome: input.outcome,
     ...(input.workspaceKind ? { workspaceKind: input.workspaceKind } : {}),
     ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+    ...(input.projectId ? { projectId: input.projectId } : {}),
+    ...(input.projectName ? { projectName: input.projectName } : {}),
     ...(input.displayPath ? { displayPath: input.displayPath } : {}),
     ...(input.denialReason ? { denialReason: input.denialReason } : {}),
     ...(typeof input.byteSize === "number" ? { byteSize: input.byteSize } : {}),
@@ -167,6 +181,8 @@ function listActivityDetails(input: {
   mode: "all" | "recent" | "changed";
   workspaceKind?: string | null;
   workspaceId?: string | null;
+  projectId?: string | null;
+  projectName?: string | null;
   resultCount?: number | null;
   scannedCount?: number | null;
   truncated?: boolean | null;
@@ -178,6 +194,8 @@ function listActivityDetails(input: {
     mode: input.mode,
     ...(input.workspaceKind ? { workspaceKind: input.workspaceKind } : {}),
     ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+    ...(input.projectId ? { projectId: input.projectId } : {}),
+    ...(input.projectName ? { projectName: input.projectName } : {}),
     ...(typeof input.resultCount === "number" ? { resultCount: input.resultCount } : {}),
     ...(typeof input.scannedCount === "number" ? { scannedCount: input.scannedCount } : {}),
     ...(typeof input.truncated === "boolean" ? { truncated: input.truncated } : {}),
@@ -200,10 +218,21 @@ function safeListAuditQuery(query: unknown): {
   return { workspace, mode };
 }
 
+function safeAuditTarget(query: unknown): { projectId: string | null; workspaceId: string | null } {
+  if (!query || typeof query !== "object") return { projectId: null, workspaceId: null };
+  const record = query as Record<string, unknown>;
+  return {
+    projectId: typeof record.projectId === "string" ? record.projectId : null,
+    workspaceId: typeof record.workspaceId === "string" ? record.workspaceId : null,
+  };
+}
+
 function safeAuditDisplayPath(query: unknown): string {
   if (!query || typeof query !== "object") return "";
   const path = (query as Record<string, unknown>).path;
-  return typeof path === "string" ? path : "";
+  if (typeof path !== "string") return "";
+  if (/[\x00-\x1f\x7f]/.test(path)) return "";
+  return path;
 }
 
 function denialReasonFromError(error: unknown) {
@@ -231,6 +260,8 @@ export function fileResourceRoutes(db: Db, opts: {
     actor: ReturnType<typeof getActorInfo>;
     issueId: string;
     displayPath: string;
+    projectId?: string | null;
+    workspaceId?: string | null;
     error: unknown;
     action?: "issue.file_resource_content_denied" | "issue.file_resource_resolve_denied";
   }) {
@@ -246,6 +277,8 @@ export function fileResourceRoutes(db: Db, opts: {
       details: activityDetails({
         outcome: "denied",
         displayPath: input.displayPath,
+        projectId: input.projectId,
+        workspaceId: input.workspaceId,
         denialReason: denialReasonFromError(input.error),
       }),
     });
@@ -256,6 +289,7 @@ export function fileResourceRoutes(db: Db, opts: {
     actor: ReturnType<typeof getActorInfo>;
     issueId: string;
     query: { workspace: "auto" | "execution" | "project"; mode: "all" | "recent" | "changed" };
+    target?: { projectId: string | null; workspaceId: string | null };
     error: unknown;
   }) {
     await logActivity(db, {
@@ -271,6 +305,8 @@ export function fileResourceRoutes(db: Db, opts: {
         outcome: "denied",
         workspaceSelector: input.query.workspace,
         mode: input.query.mode,
+        projectId: input.target?.projectId ?? null,
+        workspaceId: input.target?.workspaceId ?? null,
         denialReason: denialReasonFromError(input.error),
       }),
     });
@@ -278,6 +314,7 @@ export function fileResourceRoutes(db: Db, opts: {
 
   router.get("/issues/:issueId/file-resources/list", async (req, res) => {
     const auditQuery = safeListAuditQuery(req.query);
+    const auditTarget = safeAuditTarget(req.query);
     try {
       assertBoard(req);
     } catch (error) {
@@ -287,6 +324,7 @@ export function fileResourceRoutes(db: Db, opts: {
           actor: getActorInfo(req),
           issueId: req.params.issueId,
           query: auditQuery,
+          target: auditTarget,
           error,
         });
       }
@@ -302,6 +340,7 @@ export function fileResourceRoutes(db: Db, opts: {
         actor,
         issueId: req.params.issueId,
         query: auditQuery,
+        target: auditTarget,
         error,
       });
       throw error;
@@ -316,6 +355,7 @@ export function fileResourceRoutes(db: Db, opts: {
         actor,
         issueId: req.params.issueId,
         query: auditQuery,
+        target: auditTarget,
         error,
       });
       throw error;
@@ -330,6 +370,7 @@ export function fileResourceRoutes(db: Db, opts: {
         actor,
         issueId: req.params.issueId,
         query,
+        target: { projectId: query.projectId, workspaceId: query.workspaceId },
         error,
       });
       throw error;
@@ -352,6 +393,8 @@ export function fileResourceRoutes(db: Db, opts: {
           mode: result.query.mode,
           workspaceKind: result.workspace?.workspaceKind ?? null,
           workspaceId: result.workspace?.workspaceId ?? null,
+          projectId: result.workspace?.projectId ?? null,
+          projectName: result.workspace?.projectName ?? null,
           resultCount: result.items.length,
           scannedCount: result.scannedCount,
           truncated: result.truncated,
@@ -365,6 +408,7 @@ export function fileResourceRoutes(db: Db, opts: {
         actor,
         issueId: req.params.issueId,
         query,
+        target: { projectId: query.projectId, workspaceId: query.workspaceId },
         error,
       });
       throw error;
@@ -374,6 +418,7 @@ export function fileResourceRoutes(db: Db, opts: {
   });
 
   router.get("/issues/:issueId/file-resources/resolve", async (req, res) => {
+    const auditTarget = safeAuditTarget(req.query);
     try {
       assertBoard(req);
     } catch (error) {
@@ -383,6 +428,8 @@ export function fileResourceRoutes(db: Db, opts: {
           actor: getActorInfo(req),
           issueId: req.params.issueId,
           displayPath: safeAuditDisplayPath(req.query),
+          projectId: auditTarget.projectId,
+          workspaceId: auditTarget.workspaceId,
           error,
           action: "issue.file_resource_resolve_denied",
         });
@@ -399,12 +446,29 @@ export function fileResourceRoutes(db: Db, opts: {
         actor,
         issueId: req.params.issueId,
         displayPath: safeAuditDisplayPath(req.query),
+        projectId: auditTarget.projectId,
+        workspaceId: auditTarget.workspaceId,
         error,
         action: "issue.file_resource_resolve_denied",
       });
       throw error;
     }
-    const query = readQuery(req.query);
+    let query: ReturnType<typeof readQuery>;
+    try {
+      query = readQuery(req.query);
+    } catch (error) {
+      await logDeniedAttempt({
+        companyId: issue.companyId,
+        actor,
+        issueId: req.params.issueId,
+        displayPath: safeAuditDisplayPath(req.query),
+        projectId: auditTarget.projectId,
+        workspaceId: auditTarget.workspaceId,
+        error,
+        action: "issue.file_resource_resolve_denied",
+      });
+      throw error;
+    }
     let release: (() => void) | null = null;
     try {
       release = limiter.acquire(limiterKey(issue.companyId, actor.actorId, req.params.issueId));
@@ -414,6 +478,8 @@ export function fileResourceRoutes(db: Db, opts: {
         actor,
         issueId: req.params.issueId,
         displayPath: query.path,
+        projectId: query.projectId,
+        workspaceId: query.workspaceId,
         error,
         action: "issue.file_resource_resolve_denied",
       });
@@ -434,6 +500,8 @@ export function fileResourceRoutes(db: Db, opts: {
           outcome: "success",
           workspaceKind: result.workspaceKind,
           workspaceId: result.workspaceId,
+          projectId: result.projectId ?? null,
+          projectName: result.projectName ?? null,
           displayPath: result.displayPath,
           byteSize: result.byteSize ?? null,
           contentType: result.contentType ?? null,
@@ -447,6 +515,8 @@ export function fileResourceRoutes(db: Db, opts: {
         actor,
         issueId: req.params.issueId,
         displayPath: query.path,
+        projectId: query.projectId,
+        workspaceId: query.workspaceId,
         error,
         action: "issue.file_resource_resolve_denied",
       });
@@ -457,6 +527,7 @@ export function fileResourceRoutes(db: Db, opts: {
   });
 
   router.get("/issues/:issueId/file-resources/content", async (req, res) => {
+    const auditTarget = safeAuditTarget(req.query);
     try {
       assertBoard(req);
     } catch (error) {
@@ -466,6 +537,8 @@ export function fileResourceRoutes(db: Db, opts: {
           actor: getActorInfo(req),
           issueId: req.params.issueId,
           displayPath: safeAuditDisplayPath(req.query),
+          projectId: auditTarget.projectId,
+          workspaceId: auditTarget.workspaceId,
           error,
         });
       }
@@ -481,11 +554,27 @@ export function fileResourceRoutes(db: Db, opts: {
         actor,
         issueId: req.params.issueId,
         displayPath: safeAuditDisplayPath(req.query),
+        projectId: auditTarget.projectId,
+        workspaceId: auditTarget.workspaceId,
         error,
       });
       throw error;
     }
-    const query = readQuery(req.query);
+    let query: ReturnType<typeof readQuery>;
+    try {
+      query = readQuery(req.query);
+    } catch (error) {
+      await logDeniedAttempt({
+        companyId: issue.companyId,
+        actor,
+        issueId: req.params.issueId,
+        displayPath: safeAuditDisplayPath(req.query),
+        projectId: auditTarget.projectId,
+        workspaceId: auditTarget.workspaceId,
+        error,
+      });
+      throw error;
+    }
     let release: (() => void) | null = null;
     try {
       release = limiter.acquire(limiterKey(issue.companyId, actor.actorId, req.params.issueId));
@@ -495,6 +584,8 @@ export function fileResourceRoutes(db: Db, opts: {
         actor,
         issueId: req.params.issueId,
         displayPath: query.path,
+        projectId: query.projectId,
+        workspaceId: query.workspaceId,
         error,
       });
       throw error;
@@ -509,6 +600,8 @@ export function fileResourceRoutes(db: Db, opts: {
           actor,
           issueId: req.params.issueId,
           displayPath: query.path,
+          projectId: query.projectId,
+          workspaceId: query.workspaceId,
           error,
         });
         throw error;
@@ -528,6 +621,8 @@ export function fileResourceRoutes(db: Db, opts: {
           outcome: "success",
           workspaceKind: result.resource.workspaceKind,
           workspaceId: result.resource.workspaceId,
+          projectId: result.resource.projectId ?? null,
+          projectName: result.resource.projectName ?? null,
           displayPath: result.resource.displayPath,
           byteSize: result.resource.byteSize ?? null,
           contentType: result.resource.contentType ?? null,
