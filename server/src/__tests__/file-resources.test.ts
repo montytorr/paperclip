@@ -215,6 +215,28 @@ describeEmbeddedPostgres("workspace file resources", () => {
     expect(resolved.capabilities.preview).toBe(true);
   });
 
+  it("resolves and reads video workspace files as base64 previews", async () => {
+    const { projectRoot, executionRoot } = await makeWorkspace();
+    const graph = await seedGraph(db, { projectRoot, executionRoot });
+    await fs.writeFile(path.join(projectRoot, "demo.mp4"), Buffer.from([0, 0, 0, 24, 102, 116, 121, 112]));
+
+    const resolved = await workspaceFileResourceService(db).resolve(graph.issueId, {
+      path: "demo.mp4",
+      workspace: "project",
+    });
+    expect(resolved.previewKind).toBe("video");
+    expect(resolved.contentType).toBe("video/mp4");
+    expect(resolved.capabilities.preview).toBe(true);
+
+    const content = await workspaceFileResourceService(db).readContent(graph.issueId, {
+      path: "demo.mp4",
+      workspace: "project",
+    });
+    expect(content.resource.previewKind).toBe("video");
+    expect(content.content.encoding).toBe("base64");
+    expect(content.content.data).toBe(Buffer.from([0, 0, 0, 24, 102, 116, 121, 112]).toString("base64"));
+  });
+
   it("lists and searches safe file candidates from the preferred execution workspace", async () => {
     const { root, projectRoot, executionRoot } = await makeWorkspace();
     const graph = await seedGraph(db, { projectRoot, executionRoot });

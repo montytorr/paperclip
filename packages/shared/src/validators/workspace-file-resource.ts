@@ -9,7 +9,7 @@ function utf8ByteLength(value: string) {
 export const workspaceFileWorkspaceKindSchema = z.enum(["execution_workspace", "project_workspace"]);
 export const workspaceFileSelectorSchema = z.enum(["auto", "execution", "project"]).default("auto");
 export const workspaceFileListModeSchema = z.enum(["all", "recent", "changed"]).default("all");
-export const workspaceFilePreviewKindSchema = z.enum(["text", "image", "pdf", "unsupported"]);
+export const workspaceFilePreviewKindSchema = z.enum(["text", "image", "video", "pdf", "unsupported"]);
 export const workspaceFileResourceKindSchema = z.enum(["file", "remote_resource"]);
 
 export const workspaceFileRefSchema = z.object({

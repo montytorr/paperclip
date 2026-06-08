@@ -1,7 +1,7 @@
 export type WorkspaceFileWorkspaceKind = "execution_workspace" | "project_workspace";
 export type WorkspaceFileSelector = "auto" | "execution" | "project";
 export type WorkspaceFileListMode = "all" | "recent" | "changed";
-export type WorkspaceFilePreviewKind = "text" | "image" | "pdf" | "unsupported";
+export type WorkspaceFilePreviewKind = "text" | "image" | "video" | "pdf" | "unsupported";
 export type WorkspaceFileResourceKind = "file" | "remote_resource";
 export type WorkspaceFileContentEncoding = "utf8" | "base64";
 

@@ -87,6 +87,13 @@ const IMAGE_CONTENT_TYPES = new Map([
   [".webp", "image/webp"],
 ]);
 
+const VIDEO_CONTENT_TYPES = new Map([
+  [".m4v", "video/mp4"],
+  [".mov", "video/quicktime"],
+  [".mp4", "video/mp4"],
+  [".webm", "video/webm"],
+]);
+
 type IssueRow = typeof issues.$inferSelect;
 type ExecutionWorkspaceRow = typeof executionWorkspaces.$inferSelect;
 type ProjectWorkspaceRow = typeof projectWorkspaces.$inferSelect;
@@ -118,7 +125,9 @@ type WorkspaceFileListQueryInput = {
 };
 
 function previewCapForKind(kind: WorkspaceFilePreviewKind) {
-  return kind === "image" || kind === "pdf" ? WORKSPACE_FILE_MEDIA_MAX_BYTES : WORKSPACE_FILE_TEXT_MAX_BYTES;
+  return kind === "image" || kind === "video" || kind === "pdf"
+    ? WORKSPACE_FILE_MEDIA_MAX_BYTES
+    : WORKSPACE_FILE_TEXT_MAX_BYTES;
 }
 
 function relativePathFromReal(rootReal: string, targetReal: string) {
@@ -184,6 +193,7 @@ function shouldPruneSegments(segments: string[]) {
 function contentTypeForPath(filePath: string): string | null {
   const ext = path.extname(filePath).toLowerCase();
   if (IMAGE_CONTENT_TYPES.has(ext)) return IMAGE_CONTENT_TYPES.get(ext) ?? null;
+  if (VIDEO_CONTENT_TYPES.has(ext)) return VIDEO_CONTENT_TYPES.get(ext) ?? null;
   if (ext === ".pdf") return "application/pdf";
   if (ext === ".svg") return "image/svg+xml";
   if (ext === ".html" || ext === ".htm") return "text/html";
@@ -194,6 +204,7 @@ function contentTypeForPath(filePath: string): string | null {
 function previewKindForKnownContentType(contentType: string | null): WorkspaceFilePreviewKind | null {
   if (!contentType) return null;
   if (contentType.startsWith("image/") && contentType !== "image/svg+xml") return "image";
+  if (contentType.startsWith("video/")) return "video";
   if (contentType === "application/pdf") return "pdf";
   if (contentType === "text/html") return "unsupported";
   if (contentType === "image/svg+xml" || contentType.startsWith("text/")) return "text";

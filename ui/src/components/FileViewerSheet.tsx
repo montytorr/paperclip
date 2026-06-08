@@ -25,12 +25,12 @@ import {
   X,
 } from "lucide-react";
 import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { fileResourcesApi } from "@/api/file-resources";
@@ -142,7 +142,7 @@ export function describeDenial(code: string, fallback: string): { title: string;
     return {
       icon: <AlertTriangle aria-hidden="true" className="h-6 w-6 text-amber-500" />,
       title: "Preview not supported for this file type",
-      body: "This file does not have a text or image preview available.",
+      body: "This file does not have a text, image, or video preview available.",
     };
   }
   return {
@@ -186,7 +186,7 @@ interface FileContentViewerProps {
   onLoaded?: (summary: string) => void;
 }
 
-function FileContentViewer({ content, highlightedLine, onLoaded }: FileContentViewerProps) {
+export function FileContentViewer({ content, highlightedLine, onLoaded }: FileContentViewerProps) {
   const { resource } = content;
   const lines = useMemo(() => {
     if (resource.previewKind === "text") {
@@ -231,6 +231,32 @@ function FileContentViewer({ content, highlightedLine, onLoaded }: FileContentVi
     );
   }
 
+  if (resource.previewKind === "video") {
+    const dataUrl = content.content.encoding === "base64"
+      ? `data:${resource.contentType ?? "application/octet-stream"};base64,${content.content.data}`
+      : null;
+    if (!dataUrl) {
+      return (
+        <FileViewerStateView
+          icon={<AlertTriangle aria-hidden="true" className="h-6 w-6 text-amber-500" />}
+          title="Video preview unavailable"
+        />
+      );
+    }
+    return (
+      <div className="flex flex-1 items-center justify-center overflow-auto bg-black p-4">
+        <video
+          src={dataUrl}
+          controls
+          preload="metadata"
+          playsInline
+          aria-label={`Video preview: ${resource.title}`}
+          className="max-h-full max-w-full rounded border border-white/10 bg-black"
+        />
+      </div>
+    );
+  }
+
   if (resource.previewKind === "unsupported" || !lines) {
     return (
       <FileViewerStateView
@@ -261,7 +287,7 @@ function FileContentViewer({ content, highlightedLine, onLoaded }: FileContentVi
               ref={isHighlighted ? highlightedLineRef : undefined}
               data-line-number={lineNumber}
               className={cn(
-                "flex whitespace-pre",
+                "grid grid-cols-[auto_minmax(0,1fr)]",
                 isHighlighted && "bg-[var(--paperclip-code-highlight-bg,rgba(250,204,21,0.12))]",
               )}
             >
@@ -277,7 +303,7 @@ function FileContentViewer({ content, highlightedLine, onLoaded }: FileContentVi
               >
                 {lineNumber}
               </span>
-              <code className="flex-1 pr-4">{lineText.length === 0 ? "​" : lineText}</code>
+              <code className="min-w-0 whitespace-pre-wrap break-words pr-4">{lineText.length === 0 ? "​" : lineText}</code>
             </div>
           );
         })}
@@ -448,10 +474,9 @@ export function FileViewerSheet({
   const showDescription = state ? description !== title : true;
 
   return (
-    <Sheet open={computedOpen} onOpenChange={handleOpenChange}>
-      <SheetContent
-        side="right"
-        className="flex h-full w-full flex-col gap-0 p-0 sm:max-w-[min(900px,90vw)]"
+    <Dialog open={computedOpen} onOpenChange={handleOpenChange}>
+      <DialogContent
+        className="flex h-[min(840px,calc(100dvh-2rem))] w-[calc(100vw-2rem)] max-w-[min(1120px,calc(100vw-2rem))] flex-col gap-0 overflow-hidden p-0 sm:w-[92vw] sm:max-w-[1120px]"
         aria-labelledby={FILE_VIEWER_LABELLED_BY_ID}
         aria-describedby={FILE_VIEWER_DESCRIBED_BY_ID}
         showCloseButton={false}
@@ -463,7 +488,7 @@ export function FileViewerSheet({
           }
         }}
       >
-        <SheetHeader className="border-b border-border gap-1 p-3">
+        <DialogHeader className="border-b border-border gap-1 p-3">
           <div className="flex items-start gap-2">
             {browseMode ? (
               <FolderSearch aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
@@ -471,10 +496,10 @@ export function FileViewerSheet({
               <FileCode2 aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
             )}
             <div className="min-w-0 flex-1">
-              <SheetTitle id={FILE_VIEWER_LABELLED_BY_ID} className="truncate text-sm">
+              <DialogTitle id={FILE_VIEWER_LABELLED_BY_ID} className="truncate text-sm">
                 {title}
-              </SheetTitle>
-              <SheetDescription
+              </DialogTitle>
+              <DialogDescription
                 id={FILE_VIEWER_DESCRIBED_BY_ID}
                 className={cn(
                   "truncate font-mono text-xs",
@@ -483,7 +508,7 @@ export function FileViewerSheet({
                 title={state?.path}
               >
                 {description}
-              </SheetDescription>
+              </DialogDescription>
             </div>
             <div className="flex shrink-0 items-center gap-1">
               {cameFromBrowse ? (
@@ -579,7 +604,7 @@ export function FileViewerSheet({
               ) : null}
             </div>
           ) : null}
-        </SheetHeader>
+        </DialogHeader>
         <div className="relative flex min-h-0 flex-1 flex-col">
           <div aria-live="polite" className="sr-only">
             {announcement}
@@ -614,8 +639,8 @@ export function FileViewerSheet({
             />
           ) : null}
         </div>
-      </SheetContent>
-    </Sheet>
+      </DialogContent>
+    </Dialog>
   );
 }
 

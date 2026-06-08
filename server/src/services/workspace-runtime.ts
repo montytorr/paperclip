@@ -1936,6 +1936,7 @@ async function isRuntimeServiceUrlHealthy(
 ) {
   if (!url) return true;
   const healthUrl = resolveRuntimeServiceHealthUrl(url, input);
+  if (!healthUrl) return true;
   try {
     const response = await fetch(healthUrl, { signal: AbortSignal.timeout(2_000) });
     return response.ok;
