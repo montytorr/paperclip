@@ -78,7 +78,11 @@ import { redactEventPayload } from "../redaction.js";
 import { redactCurrentUserValue } from "../log-redaction.js";
 import { renderOrgChartSvg, renderOrgChartPng, type OrgNode, type OrgChartStyle, ORG_CHART_STYLES } from "./org-chart-svg.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
-import { runClaudeLogin } from "@paperclipai/adapter-claude-local/server";
+import {
+  runClaudeLogin,
+  runClaudeLogout,
+  runClaudeSubscriptionAuthUrl,
+} from "@paperclipai/adapter-claude-local/server";
 import {
   DEFAULT_ACPX_LOCAL_AGENT,
   DEFAULT_ACPX_LOCAL_MODE,
@@ -3258,25 +3262,78 @@ export function agentRoutes(
     res.status(202).json(run);
   });
 
-  router.post("/agents/:id/claude-login", async (req, res) => {
+  type ClaudeLocalAgent = NonNullable<Awaited<ReturnType<typeof svc.getById>>>;
+  const getClaudeLocalAgentForBoardAction = async (
+    req: Request,
+    res: Response,
+    actionLabel: string,
+  ): Promise<ClaudeLocalAgent | null> => {
     assertBoard(req);
     const id = req.params.id as string;
     const agent = await svc.getById(id);
     if (!agent) {
       res.status(404).json({ error: "Agent not found" });
-      return;
+      return null;
     }
     await assertBoardCanManageAgentsForCompany(req, agent.companyId);
     assertCompanyAccess(req, agent.companyId);
     if (agent.adapterType !== "claude_local") {
-      res.status(400).json({ error: "Login is only supported for claude_local agents" });
-      return;
+      res.status(400).json({ error: `${actionLabel} is only supported for claude_local agents` });
+      return null;
     }
+    return agent;
+  };
+
+  router.post("/agents/:id/claude-login", async (req, res) => {
+    const agent = await getClaudeLocalAgentForBoardAction(req, res, "Login");
+    if (!agent) return;
 
     const config = asRecord(agent.adapterConfig) ?? {};
     const { config: runtimeConfig } = await secretsSvc.resolveAdapterConfigForRuntime(agent.companyId, config);
     const result = await runClaudeLogin({
       runId: `claude-login-${randomUUID()}`,
+      agent: {
+        id: agent.id,
+        companyId: agent.companyId,
+        name: agent.name,
+        adapterType: agent.adapterType,
+        adapterConfig: agent.adapterConfig,
+      },
+      config: runtimeConfig,
+    });
+
+    res.json(result);
+  });
+
+  router.post("/agents/:id/claude-subscription-auth-url", async (req, res) => {
+    const agent = await getClaudeLocalAgentForBoardAction(req, res, "Subscription auth URL");
+    if (!agent) return;
+
+    const config = asRecord(agent.adapterConfig) ?? {};
+    const { config: runtimeConfig } = await secretsSvc.resolveAdapterConfigForRuntime(agent.companyId, config);
+    const result = await runClaudeSubscriptionAuthUrl({
+      runId: `claude-subscription-auth-url-${randomUUID()}`,
+      agent: {
+        id: agent.id,
+        companyId: agent.companyId,
+        name: agent.name,
+        adapterType: agent.adapterType,
+        adapterConfig: agent.adapterConfig,
+      },
+      config: runtimeConfig,
+    });
+
+    res.json(result);
+  });
+
+  router.post("/agents/:id/claude-logout", async (req, res) => {
+    const agent = await getClaudeLocalAgentForBoardAction(req, res, "Logout");
+    if (!agent) return;
+
+    const config = asRecord(agent.adapterConfig) ?? {};
+    const { config: runtimeConfig } = await secretsSvc.resolveAdapterConfigForRuntime(agent.companyId, config);
+    const result = await runClaudeLogout({
+      runId: `claude-logout-${randomUUID()}`,
       agent: {
         id: agent.id,
         companyId: agent.companyId,

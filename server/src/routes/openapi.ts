@@ -2887,6 +2887,24 @@ registry.registerPath({
   responses: { 200: r.ok(), 401: r.unauthorized },
 });
 
+registry.registerPath({
+  method: "post",
+  path: "/api/agents/{id}/claude-subscription-auth-url",
+  tags: ["agents"],
+  summary: "Get Claude subscription auth URL for agent",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/agents/{id}/claude-logout",
+  tags: ["agents"],
+  summary: "Trigger Claude logout for agent",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
 // ─── Issue interactions & tree ───────────────────────────────────────────────
 
 registry.registerPath({

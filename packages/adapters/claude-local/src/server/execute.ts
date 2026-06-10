@@ -111,6 +111,7 @@ function buildLoginResult(input: {
     stdout: input.proc.stdout,
     stderr: input.proc.stderr,
     loginUrl: input.loginUrl,
+    authUrl: input.loginUrl,
   };
 }
 
@@ -332,6 +333,18 @@ export async function runClaudeLogin(input: {
   authToken?: string;
   onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
 }) {
+  return runClaudeSubscriptionLogin(input);
+}
+
+export async function runClaudeSubscriptionLogin(input: {
+  runId: string;
+  agent: AdapterExecutionContext["agent"];
+  config: Record<string, unknown>;
+  context?: Record<string, unknown>;
+  authToken?: string;
+  onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+  timeoutSec?: number;
+}) {
   const onLog = input.onLog ?? (async () => {});
   const runtime = await buildClaudeRuntimeConfig({
     runId: input.runId,
@@ -341,13 +354,19 @@ export async function runClaudeLogin(input: {
     authToken: input.authToken,
   });
 
-  const proc = await runAdapterExecutionTargetProcess(input.runId, null, runtime.command, ["login"], {
-    cwd: runtime.cwd,
-    env: runtime.env,
-    timeoutSec: runtime.timeoutSec,
-    graceSec: runtime.graceSec,
-    onLog,
-  });
+  const proc = await runAdapterExecutionTargetProcess(
+    input.runId,
+    null,
+    runtime.command,
+    ["auth", "login", "--claudeai"],
+    {
+      cwd: runtime.cwd,
+      env: runtime.env,
+      timeoutSec: input.timeoutSec ?? runtime.timeoutSec,
+      graceSec: runtime.graceSec,
+      onLog,
+    },
+  );
 
   const loginMeta = detectClaudeLoginRequired({
     parsed: null,
@@ -358,6 +377,58 @@ export async function runClaudeLogin(input: {
   return buildLoginResult({
     proc,
     loginUrl: loginMeta.loginUrl,
+  });
+}
+
+export async function runClaudeSubscriptionAuthUrl(input: {
+  runId: string;
+  agent: AdapterExecutionContext["agent"];
+  config: Record<string, unknown>;
+  context?: Record<string, unknown>;
+  authToken?: string;
+  onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+  timeoutSec?: number;
+}) {
+  return runClaudeSubscriptionLogin({
+    ...input,
+    timeoutSec: input.timeoutSec ?? 8,
+  });
+}
+
+export async function runClaudeLogout(input: {
+  runId: string;
+  agent: AdapterExecutionContext["agent"];
+  config: Record<string, unknown>;
+  context?: Record<string, unknown>;
+  authToken?: string;
+  onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+}) {
+  const onLog = input.onLog ?? (async () => {});
+  const runtime = await buildClaudeRuntimeConfig({
+    runId: input.runId,
+    agent: input.agent,
+    config: input.config,
+    context: input.context ?? {},
+    authToken: input.authToken,
+  });
+
+  const proc = await runAdapterExecutionTargetProcess(
+    input.runId,
+    null,
+    runtime.command,
+    ["auth", "logout"],
+    {
+      cwd: runtime.cwd,
+      env: runtime.env,
+      timeoutSec: runtime.timeoutSec,
+      graceSec: runtime.graceSec,
+      onLog,
+    },
+  );
+
+  return buildLoginResult({
+    proc,
+    loginUrl: null,
   });
 }
 

@@ -67,12 +67,15 @@ import {
   Eye,
   EyeOff,
   Copy,
+  ExternalLink,
   ChevronRight,
   ChevronDown,
   ArrowLeft,
   HelpCircle,
   FolderOpen,
   AlertTriangle,
+  LogIn,
+  LogOut,
 } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -1479,6 +1482,9 @@ function AgentConfigurePage({
 
   return (
     <div className="max-w-3xl space-y-6">
+      {agent.adapterType === "claude_local" && (
+        <ClaudeAuthControls agentId={agent.id} companyId={companyId} />
+      )}
       <ConfigurationTab
         agent={agent}
         onDirtyChange={onDirtyChange}
@@ -1545,6 +1551,138 @@ function AgentConfigurePage({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function ClaudeAuthControls({
+  agentId,
+  companyId,
+  authRequired = false,
+}: {
+  agentId: string;
+  companyId?: string;
+  authRequired?: boolean;
+}) {
+  const [claudeLoginResult, setClaudeLoginResult] = useState<ClaudeLoginResult | null>(null);
+
+  useEffect(() => {
+    setClaudeLoginResult(null);
+  }, [agentId, companyId]);
+
+  const runClaudeLogin = useMutation({
+    mutationFn: () => agentsApi.loginWithClaude(agentId, companyId),
+    onSuccess: (data) => {
+      setClaudeLoginResult(data);
+    },
+  });
+  const getClaudeSubscriptionAuthUrl = useMutation({
+    mutationFn: () => agentsApi.getClaudeSubscriptionAuthUrl(agentId, companyId),
+    onSuccess: (data) => {
+      setClaudeLoginResult(data);
+    },
+  });
+  const runClaudeLogout = useMutation({
+    mutationFn: () => agentsApi.logoutFromClaude(agentId, companyId),
+    onSuccess: (data) => {
+      setClaudeLoginResult(data);
+    },
+  });
+
+  const claudeAuthUrl = claudeLoginResult?.authUrl ?? claudeLoginResult?.loginUrl ?? null;
+  const claudeAuthPending =
+    runClaudeLogin.isPending || getClaudeSubscriptionAuthUrl.isPending || runClaudeLogout.isPending;
+
+  return (
+    <div className="space-y-2 rounded-md border border-border/70 bg-accent/20 px-3 py-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 px-2 text-xs"
+          onClick={() => getClaudeSubscriptionAuthUrl.mutate()}
+          disabled={claudeAuthPending}
+        >
+          <ExternalLink className="h-3.5 w-3.5" />
+          {getClaudeSubscriptionAuthUrl.isPending ? "Getting URL..." : "Get subscription auth URL"}
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 px-2 text-xs"
+          onClick={() => runClaudeLogin.mutate()}
+          disabled={claudeAuthPending}
+        >
+          <LogIn className="h-3.5 w-3.5" />
+          {runClaudeLogin.isPending ? "Running login..." : "Login with subscription"}
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 px-2 text-xs text-destructive hover:text-destructive"
+          onClick={() => runClaudeLogout.mutate()}
+          disabled={claudeAuthPending}
+        >
+          <LogOut className="h-3.5 w-3.5" />
+          {runClaudeLogout.isPending ? "Logging out..." : "Logout"}
+        </Button>
+        {claudeAuthUrl && (
+          <Button asChild variant="link" size="sm" className="h-7 px-1 text-xs">
+            <a href={claudeAuthUrl} target="_blank" rel="noreferrer">
+              <ExternalLink className="h-3.5 w-3.5" />
+              Open auth URL
+            </a>
+          </Button>
+        )}
+      </div>
+      {authRequired && (
+        <p className="text-xs text-muted-foreground">
+          This run needs Claude subscription auth before it can be retried.
+        </p>
+      )}
+      {(runClaudeLogin.isError || getClaudeSubscriptionAuthUrl.isError || runClaudeLogout.isError) && (
+        <p className="text-xs text-destructive">
+          {runClaudeLogin.error instanceof Error
+            ? runClaudeLogin.error.message
+            : getClaudeSubscriptionAuthUrl.error instanceof Error
+              ? getClaudeSubscriptionAuthUrl.error.message
+              : runClaudeLogout.error instanceof Error
+                ? runClaudeLogout.error.message
+                : "Claude auth command failed"}
+        </p>
+      )}
+      {claudeAuthUrl && (
+        <p className="text-xs">
+          Auth URL:
+          <a
+            href={claudeAuthUrl}
+            className="text-blue-600 underline underline-offset-2 ml-1 break-all dark:text-blue-400"
+            target="_blank"
+            rel="noreferrer"
+          >
+            {claudeAuthUrl}
+          </a>
+        </p>
+      )}
+      {claudeLoginResult && (
+        <>
+          {claudeLoginResult.timedOut && claudeAuthUrl && (
+            <p className="text-xs text-muted-foreground">
+              The auth command was stopped after capturing the browser URL.
+            </p>
+          )}
+          {!!claudeLoginResult.stdout && (
+            <pre className="bg-neutral-100 dark:bg-neutral-950 rounded-md p-3 text-xs font-mono text-foreground overflow-x-auto whitespace-pre-wrap">
+              {claudeLoginResult.stdout}
+            </pre>
+          )}
+          {!!claudeLoginResult.stderr && (
+            <pre className="bg-neutral-100 dark:bg-neutral-950 rounded-md p-3 text-xs font-mono text-red-700 dark:text-red-300 overflow-x-auto whitespace-pre-wrap">
+              {claudeLoginResult.stderr}
+            </pre>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -3122,11 +3260,6 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
   const run = hydratedRun ?? initialRun;
   const metrics = runMetrics(run);
   const [sessionOpen, setSessionOpen] = useState(false);
-  const [claudeLoginResult, setClaudeLoginResult] = useState<ClaudeLoginResult | null>(null);
-
-  useEffect(() => {
-    setClaudeLoginResult(null);
-  }, [run.id]);
 
   const cancelRun = useMutation({
     mutationFn: () => heartbeatsApi.cancel(run.id),
@@ -3221,13 +3354,6 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
       queryClient.invalidateQueries({ queryKey: queryKeys.agents.runtimeState(run.agentId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.agents.taskSessions(run.agentId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.runIssues(run.id) });
-    },
-  });
-
-  const runClaudeLogin = useMutation({
-    mutationFn: () => agentsApi.loginWithClaude(run.agentId, run.companyId),
-    onSuccess: (data) => {
-      setClaudeLoginResult(data);
     },
   });
 
@@ -3361,52 +3487,12 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
                 {run.errorCode && <span className="text-muted-foreground ml-1">({run.errorCode})</span>}
               </div>
             )}
-            {run.errorCode === "claude_auth_required" && adapterType === "claude_local" && (
-              <div className="space-y-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 px-2 text-xs"
-                  onClick={() => runClaudeLogin.mutate()}
-                  disabled={runClaudeLogin.isPending}
-                >
-                  {runClaudeLogin.isPending ? "Running claude login..." : "Login to Claude Code"}
-                </Button>
-                {runClaudeLogin.isError && (
-                  <p className="text-xs text-destructive">
-                    {runClaudeLogin.error instanceof Error
-                      ? runClaudeLogin.error.message
-                      : "Failed to run Claude login"}
-                  </p>
-                )}
-                {claudeLoginResult?.loginUrl && (
-                  <p className="text-xs">
-                    Login URL:
-                    <a
-                      href={claudeLoginResult.loginUrl}
-                      className="text-blue-600 underline underline-offset-2 ml-1 break-all dark:text-blue-400"
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      {claudeLoginResult.loginUrl}
-                    </a>
-                  </p>
-                )}
-                {claudeLoginResult && (
-                  <>
-                    {!!claudeLoginResult.stdout && (
-                      <pre className="bg-neutral-100 dark:bg-neutral-950 rounded-md p-3 text-xs font-mono text-foreground overflow-x-auto whitespace-pre-wrap">
-                        {claudeLoginResult.stdout}
-                      </pre>
-                    )}
-                    {!!claudeLoginResult.stderr && (
-                      <pre className="bg-neutral-100 dark:bg-neutral-950 rounded-md p-3 text-xs font-mono text-red-700 dark:text-red-300 overflow-x-auto whitespace-pre-wrap">
-                        {claudeLoginResult.stderr}
-                      </pre>
-                    )}
-                  </>
-                )}
-              </div>
+            {adapterType === "claude_local" && (
+              <ClaudeAuthControls
+                agentId={run.agentId}
+                companyId={run.companyId}
+                authRequired={run.errorCode === "claude_auth_required"}
+              />
             )}
             {hasNonZeroExit && (
               <div className="text-xs text-red-600 dark:text-red-400">

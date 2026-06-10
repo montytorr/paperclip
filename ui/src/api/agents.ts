@@ -49,6 +49,7 @@ export interface ClaudeLoginResult {
   signal: string | null;
   timedOut: boolean;
   loginUrl: string | null;
+  authUrl: string | null;
   stdout: string;
   stderr: string;
 }
@@ -228,6 +229,10 @@ export const agentsApi = {
   ) => api.post<AgentWakeupResponse>(agentPath(id, companyId, "/wakeup"), data),
   loginWithClaude: (id: string, companyId?: string) =>
     api.post<ClaudeLoginResult>(agentPath(id, companyId, "/claude-login"), {}),
+  getClaudeSubscriptionAuthUrl: (id: string, companyId?: string) =>
+    api.post<ClaudeLoginResult>(agentPath(id, companyId, "/claude-subscription-auth-url"), {}),
+  logoutFromClaude: (id: string, companyId?: string) =>
+    api.post<ClaudeLoginResult>(agentPath(id, companyId, "/claude-logout"), {}),
   availableSkills: () =>
     api.get<{ skills: AvailableSkill[] }>("/skills/available"),
 };

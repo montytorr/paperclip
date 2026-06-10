@@ -1,11 +1,37 @@
 import { describe, expect, it } from "vitest";
 import {
+  extractClaudeLoginUrl,
   extractClaudeRetryNotBefore,
   isClaudeTransientUpstreamError,
   isClaudePoisonedPreviousMessageIdError,
   isClaudeUnknownSessionError,
   isClaudeImageProcessingError,
 } from "./parse.js";
+
+describe("extractClaudeLoginUrl", () => {
+  it("extracts the subscription auth URL from Claude CLI login output", () => {
+    const output = [
+      "Opening browser to sign in...",
+      "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=abc&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback.",
+      "Paste code here if prompted > ",
+    ].join("\n");
+
+    expect(extractClaudeLoginUrl(output)).toBe(
+      "https://claude.com/cai/oauth/authorize?code=true&client_id=abc&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback",
+    );
+  });
+
+  it("prefers Claude auth URLs when other links are present", () => {
+    const output = [
+      "Docs: https://example.com/docs",
+      "Open https://claude.com/cai/oauth/authorize?state=paperclip to continue.",
+    ].join("\n");
+
+    expect(extractClaudeLoginUrl(output)).toBe(
+      "https://claude.com/cai/oauth/authorize?state=paperclip",
+    );
+  });
+});
 
 describe("isClaudeTransientUpstreamError", () => {
   it("classifies the 'out of extra usage' subscription window failure as transient", () => {
