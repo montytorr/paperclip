@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { syncRoutineVariablesWithTemplate, type Agent, type RoutineVariable } from "@paperclipai/shared";
+import { syncRoutineVariablesWithTemplate, type RoutineVariable } from "@paperclipai/shared";
 import {
   Activity as ActivityIcon,
   AlertTriangle,
@@ -20,7 +20,7 @@ import {
   Save,
 } from "lucide-react";
 import { agentsApi } from "../api/agents";
-import { accessApi, type CompanyUserDirectoryEntry } from "../api/access";
+import { accessApi } from "../api/access";
 import { ApiError } from "../api/client";
 import type { PipelineCompanyCaseEvent, PipelineDetail, PipelineStage, PipelineTransitionEdge } from "../api/pipelines";
 import { pipelinesApi } from "../api/pipelines";
@@ -29,6 +29,8 @@ import { PageSkeleton } from "../components/PageSkeleton";
 import { MarkdownEditor } from "../components/MarkdownEditor";
 import { RoutineVariablesEditor, RoutineVariablesHint } from "../components/RoutineVariablesEditor";
 import { PipelineStageHistoryPanel } from "../components/PipelineStageHistoryPanel";
+import { AgentIcon } from "../components/AgentIconPicker";
+import { InlineEntitySelector, type InlineEntityOption } from "../components/InlineEntitySelector";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -50,14 +52,15 @@ import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useCompany } from "../context/CompanyContext";
 import { useToastActions } from "../context/ToastContext";
-import { buildMarkdownMentionOptions } from "../lib/company-members";
+import { buildCompanyUserInlineOptions, buildMarkdownMentionOptions, isAgentTaskTarget } from "../lib/company-members";
 import { formatPipelineItemEvent } from "../lib/pipeline-item-detail";
 import { queryKeys } from "../lib/queryKeys";
+import { getRecentAssigneeIds, sortAgentsByRecency } from "../lib/recent-assignees";
 import { cn, relativeTime } from "../lib/utils";
 import { Link, useNavigate, useParams } from "@/lib/router";
 
 type SettingsTab = "stages" | "guidance";
-type StageSectionKey = "overview" | "variables" | "secrets" | "runs" | "activity" | "history";
+type StageSectionKey = "overview" | "instructions" | "secrets" | "runs" | "activity" | "history";
 type ApproverKind = "any_human" | "user" | "agent";
 
 type StageConfig = {
@@ -68,6 +71,7 @@ type StageConfig = {
   variables?: unknown[];
   disabled?: boolean;
   disabledReason?: string | null;
+  assigneeAgentId?: string | null;
   requireApproval?: boolean;
   approver?: {
     kind?: ApproverKind;
@@ -95,7 +99,7 @@ const STAGE_NAV_GROUPS: Array<{
     label: "Stage",
     items: [
       { id: "overview", label: "Overview", icon: Circle },
-      { id: "variables", label: "Variables", icon: LayoutGrid },
+      { id: "instructions", label: "Instructions", icon: LayoutGrid },
       { id: "secrets", label: "Secrets", icon: KeyRound },
     ],
   },
@@ -111,7 +115,7 @@ const STAGE_NAV_GROUPS: Array<{
 
 const STAGE_SECTION_TITLES: Record<StageSectionKey, string> = {
   overview: "Overview",
-  variables: "Variables",
+  instructions: "Instructions",
   secrets: "Secrets",
   runs: "Runs",
   activity: "Activity",
@@ -210,6 +214,7 @@ type StageFormValues = {
   kind: string;
   newEntriesDisabled: boolean;
   disableReason: string;
+  assigneeAgentId: string;
   approvalRequired: boolean;
   approval: string;
   approveTarget: string;
@@ -231,6 +236,7 @@ function computeStageForm(
     kind: stage.kind,
     newEntriesDisabled: stageNewEntriesDisabled(stage),
     disableReason: config.disabledReason ?? "",
+    assigneeAgentId: typeof config.assigneeAgentId === "string" ? config.assigneeAgentId : "",
     approvalRequired: Boolean(config.requireApproval),
     approval: approvalValue(config),
     approveTarget: config.approveToStageKey ?? "",
@@ -304,26 +310,30 @@ function dedupeEdges(edges: PipelineTransitionEdge[]) {
   });
 }
 
-function humanLabel(entry: CompanyUserDirectoryEntry) {
-  return entry.user?.name || entry.user?.email || entry.principalId;
+function stageAssigneeOptionId(agentId: string | null | undefined) {
+  return agentId ? `agent:${agentId}` : "";
 }
 
-function agentLabel(agent: Agent) {
-  return agent.name || agent.role || agent.id;
+function stageAssigneeIdFromOption(value: string) {
+  return value.startsWith("agent:") ? value.slice("agent:".length) : "";
 }
 
-function Section({
-  title,
+function approverValueFromOption(value: string) {
+  return value || "any_human";
+}
+
+function FieldRow({
+  label,
   children,
 }: {
-  title: string;
+  label: string;
   children: ReactNode;
 }) {
   return (
-    <section className="space-y-3 border-t border-border pt-5">
-      <h2 className="text-sm font-semibold text-foreground">{title}</h2>
-      {children}
-    </section>
+    <div className="grid gap-2 py-3 text-sm sm:grid-cols-[10rem_minmax(0,1fr)] sm:items-center">
+      <div className="font-medium text-muted-foreground">{label}</div>
+      <div className="min-w-0">{children}</div>
+    </div>
   );
 }
 
@@ -444,7 +454,7 @@ export function PipelineSettings() {
   const [stageKind, setStageKind] = useState("open");
   const [newEntriesDisabled, setNewEntriesDisabled] = useState(false);
   const [disableReason, setDisableReason] = useState("");
-  const [approvalRequired, setApprovalRequired] = useState(false);
+  const [stageAssigneeAgentId, setStageAssigneeAgentId] = useState("");
   const [selectedApproval, setSelectedApproval] = useState("any_human");
   const [instructionsBody, setInstructionsBody] = useState("");
   const [instructionsVariables, setInstructionsVariables] = useState<RoutineVariable[]>([]);
@@ -534,6 +544,41 @@ export function PipelineSettings() {
     () => buildMarkdownMentionOptions({ agents: agentsQuery.data, members: usersQuery.data?.users }),
     [agentsQuery.data, usersQuery.data?.users],
   );
+  const recentAssigneeIds = useMemo(() => getRecentAssigneeIds(), []);
+  const recentAssigneeOptionIds = useMemo(
+    () => recentAssigneeIds.map(stageAssigneeOptionId),
+    [recentAssigneeIds],
+  );
+  const stageAssigneeOptions = useMemo<InlineEntityOption[]>(
+    () =>
+      sortAgentsByRecency(
+        (agentsQuery.data ?? []).filter(isAgentTaskTarget),
+        recentAssigneeIds,
+      ).map((agent) => ({
+        id: stageAssigneeOptionId(agent.id),
+        label: agent.name,
+        searchText: `${agent.name} ${agent.role} ${agent.title ?? ""}`,
+      })),
+    [agentsQuery.data, recentAssigneeIds],
+  );
+  const approvalOptions = useMemo<InlineEntityOption[]>(
+    () => [
+      ...buildCompanyUserInlineOptions(usersQuery.data?.users),
+      ...sortAgentsByRecency(
+        (agentsQuery.data ?? []).filter(isAgentTaskTarget),
+        recentAssigneeIds,
+      ).map((agent) => ({
+        id: `agent:${agent.id}`,
+        label: agent.name,
+        searchText: `${agent.name} ${agent.role} ${agent.title ?? ""}`,
+      })),
+    ],
+    [agentsQuery.data, recentAssigneeIds, usersQuery.data?.users],
+  );
+  const agentById = useMemo(
+    () => new Map((agentsQuery.data ?? []).map((agent) => [agent.id, agent])),
+    [agentsQuery.data],
+  );
 
   const stageEventsQuery = useQuery({
     queryKey: selectedCompanyId && pipelineId && selectedStage
@@ -584,7 +629,7 @@ export function PipelineSettings() {
     setStageKind(form.kind);
     setNewEntriesDisabled(form.newEntriesDisabled);
     setDisableReason(form.disableReason);
-    setApprovalRequired(form.approvalRequired);
+    setStageAssigneeAgentId(form.assigneeAgentId);
     setSelectedApproval(form.approval);
     setApproveTarget(form.approveTarget);
     setRejectTarget(form.rejectTarget);
@@ -621,13 +666,15 @@ export function PipelineSettings() {
     mutationFn: async () => {
       if (!pipelineId || !selectedStage || !pipeline) return null;
       const parsedApproval = parseApprovalValue(selectedApproval);
+      const nextRequiresApproval = stageKind === "review";
       const config: StageConfig = {
         ...stageConfig(selectedStage),
         variables: instructionsVariables,
         disabled: newEntriesDisabled,
         disabledReason: newEntriesDisabled ? disableReason.trim() || null : null,
-        requireApproval: approvalRequired,
-        approver: approvalRequired && parsedApproval.kind !== "any_human"
+        assigneeAgentId: stageAssigneeAgentId || null,
+        requireApproval: nextRequiresApproval,
+        approver: nextRequiresApproval && parsedApproval.kind !== "any_human"
           ? { kind: parsedApproval.kind, id: parsedApproval.id }
           : { kind: "any_human" },
         // Mirror the body into the legacy field so read-through stays consistent
@@ -889,7 +936,8 @@ export function PipelineSettings() {
         kind: stageKind,
         newEntriesDisabled,
         disableReason,
-        approvalRequired,
+        assigneeAgentId: stageAssigneeAgentId,
+        approvalRequired: stageKind === "review",
         approval: selectedApproval,
         approveTarget,
         rejectTarget,
@@ -1062,214 +1110,223 @@ export function PipelineSettings() {
               <div className="flex flex-col gap-5 md:flex-row md:gap-0">
                 <StageSubSidebar activeSection={activeStageSection} onSectionChange={setActiveStageSection} />
                 <div className="min-w-0 flex-1 md:px-8">
-                  <h2 className="mb-4 text-lg font-semibold text-foreground">
-                    {STAGE_SECTION_TITLES[activeStageSection]}
-                  </h2>
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <h2 className="text-lg font-semibold text-foreground">
+                      {STAGE_SECTION_TITLES[activeStageSection]}
+                    </h2>
+                    {activeStageSection === "overview" ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        className={cn(
+                          "h-8 w-8",
+                          newEntriesDisabled &&
+                            "border-amber-500/50 bg-amber-500/10 text-amber-700 hover:bg-amber-500/20 dark:text-amber-300",
+                        )}
+                        title={newEntriesDisabled ? "Resume new entries" : "Pause new entries"}
+                        aria-label={newEntriesDisabled ? "Resume new entries" : "Pause new entries"}
+                        onClick={() => setNewEntriesDisabled((value) => !value)}
+                      >
+                        {newEntriesDisabled ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
+                      </Button>
+                    ) : null}
+                  </div>
 
                   {activeStageSection === "overview" ? (
-                    <div className="mx-auto w-full max-w-3xl space-y-5">
-                      <Section title="Basics">
-                        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
-                          <label className="block space-y-1.5 text-sm font-medium">
-                            <span>Name</span>
-                            <Input value={stageName} onChange={(event) => setStageName(event.target.value)} required />
-                          </label>
-                          <label className="block space-y-1.5 text-sm font-medium">
-                            <span>Kind</span>
-                            <select
-                              value={stageKind}
-                              onChange={(event) => setStageKindWithDefaults(event.target.value)}
-                              className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                            >
-                              <option value="open">Open</option>
-                              <option value="working">Working</option>
-                              <option value="review">Review</option>
-                              <option value="done">Done</option>
-                              <option value="cancelled">Cancelled</option>
-                            </select>
-                          </label>
-                        </div>
-                      </Section>
-
-                      <Section title="Approval">
-                        <div className="flex items-center justify-between gap-4">
-                          <div>
-                            <div className="text-sm font-medium">Require approval</div>
-                            <p className="mt-1 text-sm text-muted-foreground">
-                              Items need a sign-off before they can leave this stage.
-                            </p>
-                          </div>
-                          <ToggleSwitch checked={approvalRequired} onCheckedChange={setApprovalRequired} />
-                        </div>
-                        {approvalRequired ? (
-                          <label className="block max-w-md space-y-1.5 text-sm font-medium">
-                            <span>Approver</span>
-                            <select
-                              aria-label="Approval picker"
-                              value={selectedApproval}
-                              onChange={(event) => setSelectedApproval(event.target.value)}
-                              className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                            >
-                              <option value="any_human">Any human</option>
-                              <optgroup label="People">
-                                {(usersQuery.data?.users ?? []).map((user) => (
-                                  <option key={user.principalId} value={`user:${user.principalId}`}>
-                                    {humanLabel(user)}
-                                  </option>
-                                ))}
-                              </optgroup>
-                              <optgroup label="Agents">
-                                {(agentsQuery.data ?? []).map((agent) => (
-                                  <option key={agent.id} value={`agent:${agent.id}`}>
-                                    {agentLabel(agent)}
-                                  </option>
-                                ))}
-                              </optgroup>
-                            </select>
-                          </label>
-                        ) : null}
-                      </Section>
-
-                      {stageKind === "review" ? (
-                        <Section title="Review outcomes">
-                          <p className="text-sm text-muted-foreground">
-                            These are this stage&apos;s allowed next steps. Each outcome sends the item to the stage you pick.
-                          </p>
-                          <div className="space-y-2">
-                            {([
-                              ["Approved items move to", approveTarget, setApproveTarget, "Choose a stage"],
-                              ["Declined items move to", rejectTarget, setRejectTarget, "Choose a stage"],
-                              ["Items needing changes move to", requestChangesTarget, setRequestChangesTarget, "Stay in review"],
-                            ] as const).map(([label, value, setValue, emptyLabel]) => (
-                              <div
-                                key={label}
-                                className="grid grid-cols-1 items-center gap-2 sm:grid-cols-[minmax(0,1fr)_240px]"
-                              >
-                                <span className="text-sm font-medium">{label}</span>
-                                <select
-                                  aria-label={label}
-                                  value={value}
-                                  onChange={(event) => setValue(event.target.value)}
-                                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                                >
-                                  <option value="">{emptyLabel}</option>
-                                  {otherStages.map((stage) => (
-                                    <option key={stage.id} value={stage.key}>{stage.name}</option>
-                                  ))}
-                                </select>
-                              </div>
-                            ))}
-                            <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-[minmax(0,1fr)_240px]">
-                              <span className="text-sm font-medium">Ask for a note when declining</span>
-                              <div className="sm:justify-self-start">
-                                <ToggleSwitch checked={requireRejectReason} onCheckedChange={setRequireRejectReason} />
-                              </div>
-                            </div>
-                          </div>
-                          {reviewTargetsMissing ? (
-                            <p className="text-sm text-muted-foreground">
-                              Pick where approved and declined items should go before saving.
-                            </p>
-                          ) : null}
-                        </Section>
-                      ) : null}
-
-                      {isReviewStage ? null : (
-                        <Section title="Allowed next steps">
-                          <p className="text-sm text-muted-foreground">
-                            Where items in {selectedStage.name} are allowed to move next.
-                          </p>
-                          <div className="space-y-2">
-                            {otherStages.map((stage) => {
-                              const isCancelled = stage.kind === "cancelled";
-                              const checked = isCancelled || transitionTargets.has(stage.id);
-                              return (
-                                <label
-                                  key={stage.id}
-                                  className={cn(
-                                    "flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm",
-                                    isCancelled && "text-muted-foreground",
-                                  )}
-                                >
-                                  <input
-                                    type="checkbox"
-                                    checked={checked}
-                                    disabled={isCancelled}
-                                    onChange={(event) => {
-                                      if (isCancelled) return;
-                                      setTransitionTargets((current) => {
-                                        const next = new Set(current);
-                                        if (event.target.checked) next.add(stage.id);
-                                        else next.delete(stage.id);
-                                        return next;
-                                      });
-                                    }}
-                                  />
-                                  <span className="flex-1">{stage.name}</span>
-                                  {isCancelled ? (
-                                    <span className="text-xs text-muted-foreground">Always available</span>
-                                  ) : null}
-                                </label>
-                              );
-                            })}
-                          </div>
-                        </Section>
-                      )}
-
-                      <Section title="New entries">
-                        <div className="flex items-center justify-between gap-4">
-                          <div>
-                            <div className="text-sm font-medium">
-                              {newEntriesDisabled ? "New entries are paused" : "New entries are open"}
-                            </div>
-                            <p className="mt-1 text-sm text-muted-foreground">
-                              When paused, nothing new can move into this stage. Existing items stay on the board.
-                            </p>
-                          </div>
-                          <Button
-                            type="button"
-                            variant={newEntriesDisabled ? "default" : "outline"}
-                            onClick={() => setNewEntriesDisabled((value) => !value)}
+                    <div className="w-full max-w-3xl">
+                      <div className="divide-y divide-border border-b border-border">
+                        <FieldRow label="Name">
+                          <Input value={stageName} onChange={(event) => setStageName(event.target.value)} required />
+                        </FieldRow>
+                        <FieldRow label="Kind">
+                          <select
+                            value={stageKind}
+                            onChange={(event) => setStageKindWithDefaults(event.target.value)}
+                            className="h-10 w-full max-w-xs rounded-md border border-input bg-background px-3 text-sm"
                           >
-                            {newEntriesDisabled ? (
-                              <>
-                                <Play className="h-4 w-4" />
-                                Resume
-                              </>
-                            ) : (
-                              <>
-                                <Pause className="h-4 w-4" />
-                                Pause new entries
-                              </>
-                            )}
-                          </Button>
-                        </div>
-                      </Section>
+                            <option value="open">Open</option>
+                            <option value="working">Working</option>
+                            <option value="review">Review</option>
+                            <option value="done">Done</option>
+                            <option value="cancelled">Cancelled</option>
+                          </select>
+                        </FieldRow>
+
+                        {stageKind === "review" ? (
+                          <FieldRow label="Approver">
+                            <InlineEntitySelector
+                              value={selectedApproval === "any_human" ? "" : selectedApproval}
+                              options={approvalOptions}
+                              recentOptionIds={recentAssigneeOptionIds}
+                              placeholder="Approver"
+                              noneLabel="Any human"
+                              searchPlaceholder="Search approvers..."
+                              emptyMessage="No approvers found."
+                              onChange={(value) => setSelectedApproval(approverValueFromOption(value))}
+                              renderTriggerValue={(option) => {
+                                if (!option) return <span className="text-muted-foreground">Any human</span>;
+                                const agent = option.id.startsWith("agent:") ? agentById.get(option.id.slice("agent:".length)) : null;
+                                return (
+                                  <>
+                                    {agent ? <AgentIcon icon={agent.icon} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : null}
+                                    <span className="truncate">{option.label}</span>
+                                  </>
+                                );
+                              }}
+                              renderOption={(option) => {
+                                if (!option.id) return <span className="truncate">{option.label}</span>;
+                                const agent = option.id.startsWith("agent:") ? agentById.get(option.id.slice("agent:".length)) : null;
+                                return (
+                                  <>
+                                    {agent ? <AgentIcon icon={agent.icon} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : null}
+                                    <span className="truncate">{option.label}</span>
+                                  </>
+                                );
+                              }}
+                            />
+                          </FieldRow>
+                        ) : null}
+
+                        {stageKind === "review" ? (
+                          <FieldRow label="Review outcomes">
+                            <div className="space-y-2">
+                              {([
+                                ["Approved items move to", approveTarget, setApproveTarget, "Choose a stage"],
+                                ["Declined items move to", rejectTarget, setRejectTarget, "Choose a stage"],
+                                ["Items needing changes move to", requestChangesTarget, setRequestChangesTarget, "Stay in review"],
+                              ] as const).map(([label, value, setValue, emptyLabel]) => (
+                                <div
+                                  key={label}
+                                  className="grid grid-cols-1 items-center gap-2 sm:grid-cols-[minmax(0,1fr)_240px]"
+                                >
+                                  <span className="text-sm font-medium">{label}</span>
+                                  <select
+                                    aria-label={label}
+                                    value={value}
+                                    onChange={(event) => setValue(event.target.value)}
+                                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                                  >
+                                    <option value="">{emptyLabel}</option>
+                                    {otherStages.map((stage) => (
+                                      <option key={stage.id} value={stage.key}>{stage.name}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                              ))}
+                              <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-[minmax(0,1fr)_240px]">
+                                <span className="text-sm font-medium">Ask for a note when declining</span>
+                                <div className="sm:justify-self-start">
+                                  <ToggleSwitch checked={requireRejectReason} onCheckedChange={setRequireRejectReason} />
+                                </div>
+                              </div>
+                            </div>
+                            {reviewTargetsMissing ? (
+                              <p className="mt-2 text-sm text-muted-foreground">
+                                Pick where approved and declined items should go before saving.
+                              </p>
+                            ) : null}
+                          </FieldRow>
+                        ) : null}
+
+                        {isReviewStage ? null : (
+                          <FieldRow label="Allowed next steps">
+                            <div className="space-y-2">
+                              {otherStages.map((stage) => {
+                                const isCancelled = stage.kind === "cancelled";
+                                const checked = isCancelled || transitionTargets.has(stage.id);
+                                return (
+                                  <label
+                                    key={stage.id}
+                                    className={cn(
+                                      "flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm",
+                                      isCancelled && "text-muted-foreground",
+                                    )}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={checked}
+                                      disabled={isCancelled}
+                                      onChange={(event) => {
+                                        if (isCancelled) return;
+                                        setTransitionTargets((current) => {
+                                          const next = new Set(current);
+                                          if (event.target.checked) next.add(stage.id);
+                                          else next.delete(stage.id);
+                                          return next;
+                                        });
+                                      }}
+                                    />
+                                    <span className="flex-1">{stage.name}</span>
+                                    {isCancelled ? (
+                                      <span className="text-xs text-muted-foreground">Always available</span>
+                                    ) : null}
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          </FieldRow>
+                        )}
+                      </div>
                     </div>
                   ) : null}
 
-                  {activeStageSection === "variables" ? (
-                    <div className="mx-auto w-full max-w-3xl space-y-5">
-                      <Section title="Instructions">
-                        <p className="text-sm text-muted-foreground">
-                          The plain-language routine this stage runs. Type <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">{"{{name}}"}</code> to add a
-                          variable; it appears below and the first stage&apos;s variables become the Add-item form fields.
-                        </p>
-                        <div data-testid="stage-instructions-editor" className="rounded-md border border-input">
-                          <MarkdownEditor
-                            value={instructionsBody}
-                            onChange={setInstructionsBody}
-                            placeholder="Describe the work that should happen in this stage."
-                            bordered={false}
-                            contentClassName="min-h-[120px] px-3 py-2 text-[15px] leading-7"
-                            mentions={mentionOptions}
-                            onSubmit={() => {
-                              if (!saveStage.isPending && stageName.trim() && !reviewTargetsMissing) {
-                                saveStage.mutate();
-                              }
+                  {activeStageSection === "instructions" ? (
+                    <div className="w-full max-w-3xl space-y-6">
+                      <div className="overflow-x-auto overscroll-x-contain">
+                        <div className="inline-flex min-w-full flex-wrap items-center gap-2 text-sm text-muted-foreground sm:min-w-max sm:flex-nowrap">
+                          <span>For</span>
+                          <InlineEntitySelector
+                            value={stageAssigneeOptionId(stageAssigneeAgentId)}
+                            options={stageAssigneeOptions}
+                            recentOptionIds={recentAssigneeOptionIds}
+                            placeholder="Assignee"
+                            noneLabel="No assignee"
+                            searchPlaceholder="Search assignees..."
+                            emptyMessage="No assignees found."
+                            onChange={(value) => setStageAssigneeAgentId(stageAssigneeIdFromOption(value))}
+                            renderTriggerValue={(option) => {
+                              if (!option) return <span className="text-muted-foreground">Assignee</span>;
+                              const agent = stageAssigneeIdFromOption(option.id)
+                                ? agentById.get(stageAssigneeIdFromOption(option.id))
+                                : null;
+                              return (
+                                <>
+                                  {agent ? <AgentIcon icon={agent.icon} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : null}
+                                  <span className="truncate">{option.label}</span>
+                                </>
+                              );
+                            }}
+                            renderOption={(option) => {
+                              if (!option.id) return <span className="truncate">{option.label}</span>;
+                              const agentId = stageAssigneeIdFromOption(option.id);
+                              const agent = agentId ? agentById.get(agentId) : null;
+                              return (
+                                <>
+                                  {agent ? <AgentIcon icon={agent.icon} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : null}
+                                  <span className="truncate">{option.label}</span>
+                                </>
+                              );
                             }}
                           />
                         </div>
+                      </div>
+
+                      <div data-testid="stage-instructions-editor">
+                        <MarkdownEditor
+                          value={instructionsBody}
+                          onChange={setInstructionsBody}
+                          placeholder="Add instructions..."
+                          bordered={false}
+                          contentClassName="min-h-[120px] text-[15px] leading-7"
+                          mentions={mentionOptions}
+                          onSubmit={() => {
+                            if (!saveStage.isPending && stageName.trim() && !reviewTargetsMissing) {
+                              saveStage.mutate();
+                            }
+                          }}
+                        />
+                      </div>
                         {instructionsConflict ? (
                           <div className="flex flex-col gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-sm text-amber-900 dark:text-amber-200 sm:flex-row sm:items-center sm:justify-between">
                             <span>Someone else updated these instructions. Reload to get their version, then re-apply your edits.</span>
@@ -1282,18 +1339,17 @@ export function PipelineSettings() {
                         <div className="space-y-3">
                           <RoutineVariablesHint />
                           <RoutineVariablesEditor
-                            title=""
+                            title={stageName}
                             description={instructionsBody}
                             value={instructionsVariables}
                             onChange={setInstructionsVariables}
                           />
                         </div>
-                      </Section>
                     </div>
                   ) : null}
 
                   {activeStageSection === "secrets" ? (
-                    <div className="mx-auto w-full max-w-3xl">
+                    <div className="w-full max-w-3xl">
                       <EmptyState icon={KeyRound} message="No stage secrets configured." />
                     </div>
                   ) : null}
@@ -1327,7 +1383,7 @@ export function PipelineSettings() {
                   ) : null}
 
                   {activeStageSection === "history" ? (
-                    <div className="mx-auto w-full max-w-3xl">
+                    <div className="w-full max-w-3xl">
                       {instructionsKey ? (
                         <PipelineStageHistoryPanel
                           pipelineId={pipelineId}

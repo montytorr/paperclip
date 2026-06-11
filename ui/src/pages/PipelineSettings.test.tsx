@@ -252,11 +252,10 @@ describe("PipelineSettings", () => {
     await flushQueries();
 
     flushSync(() => {
-      findButton(container, "Variables")!.click();
+      findButton(container, "Instructions")!.click();
     });
 
     const headings = Array.from(container.querySelectorAll("h2")).map((heading) => heading.textContent ?? "");
-    expect(headings).toContain("Variables");
     expect(headings).toContain("Instructions");
     expect(headings).not.toContain("What happens here");
     expect(headings).not.toContain("Routine variables");
@@ -269,24 +268,26 @@ describe("PipelineSettings", () => {
     queryClient.clear();
   });
 
-  it("hides the approval picker until approval is required", async () => {
+  it("shows the approver picker only for review stages", async () => {
     const { container, root, queryClient } = renderSettings();
     await flushQueries();
 
     expect(container.querySelector('[aria-label="Approval picker"]')).toBeNull();
-    const switches = Array.from(container.querySelectorAll('[role="switch"]')) as HTMLButtonElement[];
-    expect(switches.length).toBeGreaterThanOrEqual(1);
+    expect(container.textContent).not.toContain("Require approval");
+    expect(container.textContent).not.toContain("Any human");
+
+    const kindSelect = Array.from(container.querySelectorAll("select")).find((select) =>
+      Array.from(select.options).some((option) => option.value === "review"),
+    )!;
 
     flushSync(() => {
-      switches[0]!.click();
+      kindSelect.value = "review";
+      kindSelect.dispatchEvent(new Event("change", { bubbles: true }));
     });
 
-    const picker = container.querySelector<HTMLSelectElement>('[aria-label="Approval picker"]');
-    expect(picker).not.toBeNull();
-    const options = Array.from(picker!.querySelectorAll("option")).map((option) => option.textContent);
-    expect(options).toContain("Any human");
-    expect(options).toContain("Ada Human");
-    expect(options).toContain("QA Agent");
+    expect(container.querySelector('[aria-label="Approval picker"]')).toBeNull();
+    expect(container.textContent).toContain("Approver");
+    expect(container.textContent).toContain("Any human");
 
     flushSync(() => {
       root.unmount();
@@ -338,7 +339,7 @@ describe("PipelineSettings", () => {
     await flushQueries();
 
     flushSync(() => {
-      findButton(container, "Variables")!.click();
+      findButton(container, "Instructions")!.click();
     });
 
     const editor = container.querySelector<HTMLTextAreaElement>('[aria-label="Stage instructions"]')!;
@@ -355,7 +356,7 @@ describe("PipelineSettings", () => {
     await flushQueries();
 
     flushSync(() => {
-      findButton(container, "Variables")!.click();
+      findButton(container, "Instructions")!.click();
     });
 
     const editor = container.querySelector<HTMLTextAreaElement>('[aria-label="Stage instructions"]')!;
@@ -399,7 +400,7 @@ describe("PipelineSettings", () => {
     await flushQueries();
 
     flushSync(() => {
-      findButton(container, "Variables")!.click();
+      findButton(container, "Instructions")!.click();
     });
 
     const editor = container.querySelector<HTMLTextAreaElement>('[aria-label="Stage instructions"]')!;
