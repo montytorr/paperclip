@@ -75,7 +75,7 @@ async function createMockGatewayServer(options?: {
             ok: true,
             payload: {
               type: "hello-ok",
-              protocol: 3,
+              protocol: 4,
               server: { version: "test", connId: "conn-1" },
               features: { methods: ["connect", "agent", "agent.wait"], events: ["agent"] },
               snapshot: { version: 1, ts: Date.now() },
@@ -502,14 +502,43 @@ describe("openclaw gateway adapter execute", () => {
       );
       expect(String(payload?.message ?? "")).toContain("First comment");
       expect(String(payload?.message ?? "")).toContain("\"commentIds\":[\"comment-1\",\"comment-2\"]");
-      expect(payload?.paperclip).toMatchObject({
-        wake: {
-          latestCommentId: "comment-2",
-          commentIds: ["comment-1", "comment-2"],
-        },
-      });
+      expect(payload?.paperclip).toBeUndefined();
 
       expect(logs.some((entry) => entry.includes("[openclaw-gateway:event] run=run-123 stream=assistant"))).toBe(true);
+    } finally {
+      await gateway.close();
+    }
+  });
+
+  it("can send a lean gateway message without appending the Paperclip workflow", async () => {
+    const gateway = await createMockGatewayServer();
+
+    try {
+      const result = await execute(
+        buildContext({
+          url: gateway.url,
+          headers: {
+            "x-openclaw-token": "gateway-token",
+          },
+          includePaperclipWorkflow: false,
+          payloadTemplate: {
+            message: "Reply exactly with: PAPERCLIP_OPENCLAW_LIVE_OK.",
+            promptMode: "minimal",
+            source: "legacy-paperclip-metadata",
+            paperclip: { runId: "legacy" },
+          },
+          waitTimeoutMs: 2000,
+        }),
+      );
+
+      expect(result.exitCode).toBe(0);
+
+      const payload = gateway.getAgentPayload();
+      expect(payload).toBeTruthy();
+      expect(payload?.message).toBe("Reply exactly with: PAPERCLIP_OPENCLAW_LIVE_OK.");
+      expect(payload?.promptMode).toBe("minimal");
+      expect(payload?.source).toBeUndefined();
+      expect(payload?.paperclip).toBeUndefined();
     } finally {
       await gateway.close();
     }

@@ -86,12 +86,55 @@ type GatewayClientRequestOptions = {
   expectFinal?: boolean;
 };
 
-const PROTOCOL_VERSION = 3;
+const PROTOCOL_VERSION = 4;
 const DEFAULT_SCOPES = ["operator.admin"];
 const DEFAULT_CLIENT_ID = "gateway-client";
 const DEFAULT_CLIENT_MODE = "backend";
 const DEFAULT_CLIENT_VERSION = "paperclip";
 const DEFAULT_ROLE = "operator";
+
+const OPENCLAW_AGENT_PARAM_KEYS = new Set([
+  "message",
+  "agentId",
+  "provider",
+  "model",
+  "to",
+  "replyTo",
+  "sessionId",
+  "sessionKey",
+  "thinking",
+  "deliver",
+  "attachments",
+  "channel",
+  "replyChannel",
+  "accountId",
+  "replyAccountId",
+  "threadId",
+  "groupId",
+  "groupChannel",
+  "groupSpace",
+  "timeout",
+  "bestEffortDeliver",
+  "lane",
+  "cleanupBundleMcpOnRunEnd",
+  "modelRun",
+  "promptMode",
+  "extraSystemPrompt",
+  "bootstrapContextMode",
+  "bootstrapContextRunKind",
+  "acpTurnSource",
+  "internalRuntimeHandoffId",
+  "execApprovalFollowupExpectedSessionId",
+  "internalEvents",
+  "inputProvenance",
+  "suppressPromptPersistence",
+  "sessionEffects",
+  "sourceReplyDeliveryMode",
+  "disableMessageTool",
+  "voiceWakeTrigger",
+  "idempotencyKey",
+  "label",
+]);
 
 const SENSITIVE_LOG_KEY_PATTERN =
   /(^|[_-])(auth|authorization|token|secret|password|api[_-]?key|private[_-]?key)([_-]|$)|^x-openclaw-(auth|token)$/i;
@@ -303,6 +346,14 @@ function stringifyForLog(value: unknown, maxChars: number): string {
   return `${text.slice(0, maxChars)}... [truncated ${text.length - maxChars} chars]`;
 }
 
+function filterOpenClawAgentParams(value: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (OPENCLAW_AGENT_PARAM_KEYS.has(key)) out[key] = entry;
+  }
+  return out;
+}
+
 function buildWakePayload(ctx: AdapterExecutionContext): WakePayload {
   const { runId, agent, context } = ctx;
   return {
@@ -452,6 +503,33 @@ function buildWakeText(
     "Complete the workflow in this run.",
   ];
   return lines.join("\n");
+}
+
+function buildCompactWakeText(
+  payload: WakePayload,
+  structuredWakePrompt: string,
+  structuredWakeJson: string | null,
+): string {
+  const sections = [
+    "Paperclip wake event for the OpenClaw gateway adapter.",
+    `run_id=${payload.runId}`,
+    `agent_id=${payload.agentId}`,
+    `company_id=${payload.companyId}`,
+    ...(payload.taskId ? [`task_id=${payload.taskId}`] : []),
+    ...(payload.issueId ? [`issue_id=${payload.issueId}`] : []),
+    ...(payload.wakeReason ? [`wake_reason=${payload.wakeReason}`] : []),
+    ...(structuredWakePrompt ? ["", structuredWakePrompt] : []),
+    ...(structuredWakeJson
+      ? [
+          "",
+          "Structured wake payload JSON:",
+          "```json",
+          structuredWakeJson,
+          "```",
+        ]
+      : []),
+  ];
+  return sections.join("\n");
 }
 
 function appendWakeText(baseText: string, wakeText: string): string {
@@ -1114,13 +1192,20 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const paperclipEnv = buildPaperclipEnvForWake(ctx, wakePayload);
   const structuredWakePrompt = renderPaperclipWakePrompt(ctx.context.paperclipWake);
   const structuredWakeJson = stringifyPaperclipWakePayload(ctx.context.paperclipWake);
-  const wakeText = buildWakeText(
-    wakePayload,
-    paperclipEnv,
-    structuredWakeJson
-      ? joinWakePayloadSections(structuredWakePrompt, structuredWakeJson)
-      : structuredWakePrompt,
+  const includePaperclipWorkflow = parseBoolean(
+    ctx.config.includePaperclipWorkflow ?? ctx.config.paperclipWorkflow,
+    true,
   );
+  const templateMessage = nonEmpty(payloadTemplate.message) ?? nonEmpty(payloadTemplate.text);
+  const wakeText = includePaperclipWorkflow
+    ? buildWakeText(
+        wakePayload,
+        paperclipEnv,
+        structuredWakeJson
+          ? joinWakePayloadSections(structuredWakePrompt, structuredWakeJson)
+          : structuredWakePrompt,
+      )
+    : buildCompactWakeText(wakePayload, structuredWakePrompt, structuredWakeJson ?? "");
 
   const sessionKeyStrategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
   const configuredSessionKey = nonEmpty(ctx.config.sessionKey);
@@ -1133,18 +1218,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     issueId: wakePayload.issueId,
   });
 
-  const templateMessage = nonEmpty(payloadTemplate.message) ?? nonEmpty(payloadTemplate.text);
-  const message = templateMessage ? appendWakeText(templateMessage, wakeText) : wakeText;
-  const paperclipPayload = buildStandardPaperclipPayload(ctx, wakePayload, paperclipEnv, payloadTemplate);
+  const message = includePaperclipWorkflow
+    ? templateMessage
+      ? appendWakeText(templateMessage, wakeText)
+      : wakeText
+    : templateMessage ?? wakeText;
 
   const agentParams: Record<string, unknown> = {
-    ...payloadTemplate,
+    ...filterOpenClawAgentParams(payloadTemplate),
     message,
     sessionKey,
     idempotencyKey: ctx.runId,
   };
   delete agentParams.text;
-  agentParams.paperclip = paperclipPayload;
 
   if (configuredAgentId && !nonEmpty(agentParams.agentId)) {
     agentParams.agentId = configuredAgentId;
