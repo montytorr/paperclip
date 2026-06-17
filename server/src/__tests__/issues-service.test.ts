@@ -3308,6 +3308,14 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
       status: "succeeded",
       startedAt: new Date("2026-05-23T22:10:00.000Z"),
     });
+    await db.insert(workspaceOperations).values({
+      companyId,
+      executionWorkspaceId,
+      issueId: null,
+      phase: "worktree_prepare",
+      status: "succeeded",
+      startedAt: new Date("2026-05-23T22:15:00.000Z"),
+    });
 
     await expect(svc.listWakeableBlockedDependents(blockerId)).resolves.toEqual([
       expect.objectContaining({

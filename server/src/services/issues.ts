@@ -707,30 +707,37 @@ async function listPendingFinalizeBlockerIssueIds(
       ),
     );
 
-  const latestByBlockerWorkspace = new Map<string, { phase: string; status: string; startedAt: Date }>();
+  const latestAttributedByBlockerWorkspace = new Map<string, { phase: string; status: string; startedAt: Date }>();
+  const latestUnattributedByWorkspace = new Map<string, { phase: string; status: string; startedAt: Date }>();
   for (const row of rows) {
     if (!row.executionWorkspaceId) continue;
-    const keys = row.issueId
-      ? [`${row.issueId}:${row.executionWorkspaceId}`]
-      : blockerWorkspacePairs
-        .filter((pair) => pair.executionWorkspaceId === row.executionWorkspaceId)
-        .map((pair) => `${pair.blockerIssueId}:${pair.executionWorkspaceId}`);
-
-    for (const key of keys) {
+    if (row.issueId) {
+      const key = `${row.issueId}:${row.executionWorkspaceId}`;
       if (!blockerWorkspaceKeys.has(key)) continue;
-      const current = latestByBlockerWorkspace.get(key);
+      const current = latestAttributedByBlockerWorkspace.get(key);
       if (!current || row.startedAt > current.startedAt) {
-        latestByBlockerWorkspace.set(key, {
+        latestAttributedByBlockerWorkspace.set(key, {
           phase: row.phase,
           status: row.status,
           startedAt: row.startedAt,
         });
       }
+      continue;
+    }
+
+    const current = latestUnattributedByWorkspace.get(row.executionWorkspaceId);
+    if (!current || row.startedAt > current.startedAt) {
+      latestUnattributedByWorkspace.set(row.executionWorkspaceId, {
+        phase: row.phase,
+        status: row.status,
+        startedAt: row.startedAt,
+      });
     }
   }
 
   for (const pair of blockerWorkspacePairs) {
-    const latest = latestByBlockerWorkspace.get(`${pair.blockerIssueId}:${pair.executionWorkspaceId}`);
+    const latest = latestAttributedByBlockerWorkspace.get(`${pair.blockerIssueId}:${pair.executionWorkspaceId}`)
+      ?? latestUnattributedByWorkspace.get(pair.executionWorkspaceId);
     if (!latest) continue; // no ops recorded -> nothing to finalize for this blocker
     if (latest.phase === "workspace_finalize" && latest.status === "succeeded") continue;
     pending.add(pair.blockerIssueId);
