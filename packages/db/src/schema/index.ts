@@ -22,6 +22,21 @@ export { agentRuntimeState } from "./agent_runtime_state.js";
 export { agentTaskSessions } from "./agent_task_sessions.js";
 export { agentWakeupRequests } from "./agent_wakeup_requests.js";
 export { projects } from "./projects.js";
+export {
+  coiAssignments,
+  coiAuditEvents,
+  coiChecklistItems,
+  coiComplianceReviews,
+  coiDocumentMetadata,
+  coiEndorsementEvidence,
+  coiExceptions,
+  coiPolicies,
+  coiProjects,
+  coiReminders,
+  coiRequirementItems,
+  coiRequirementSets,
+  coiSubcontractors,
+} from "./coi.js";
 export { projectMemberships } from "./project_memberships.js";
 export { projectWorkspaces } from "./project_workspaces.js";
 export { executionWorkspaces } from "./execution_workspaces.js";
