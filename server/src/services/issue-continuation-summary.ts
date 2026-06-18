@@ -2,6 +2,7 @@ import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { documents, issueDocuments, issues } from "@paperclipai/db";
 import { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY, type SourceTrustMetadata } from "@paperclipai/shared";
+import { HttpError } from "../errors.js";
 import { documentService } from "./documents.js";
 
 export { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY };
@@ -246,39 +247,47 @@ export async function refreshIssueContinuationSummary(input: {
   agent: AgentSummaryInput;
 }) {
   const { db, issueId, run, agent } = input;
-  const [issue, existing] = await Promise.all([
-    db
-      .select({
-        id: issues.id,
-        identifier: issues.identifier,
-        title: issues.title,
-        description: issues.description,
-        status: issues.status,
-        priority: issues.priority,
-      })
-      .from(issues)
-      .where(eq(issues.id, issueId))
-      .then((rows) => rows[0] ?? null),
-    getIssueContinuationSummaryDocument(db, issueId),
-  ]);
-
+  const issue = await db
+    .select({
+      id: issues.id,
+      identifier: issues.identifier,
+      title: issues.title,
+      description: issues.description,
+      status: issues.status,
+      priority: issues.priority,
+    })
+    .from(issues)
+    .where(eq(issues.id, issueId))
+    .then((rows) => rows[0] ?? null);
   if (!issue) return null;
-  const body = buildContinuationSummaryMarkdown({
-    issue,
-    run,
-    agent,
-    previousSummaryBody: existing?.body ?? null,
-  });
-  const result = await documentService(db).upsertIssueDocument({
-    issueId,
-    key: ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY,
-    title: ISSUE_CONTINUATION_SUMMARY_TITLE,
-    format: "markdown",
-    body,
-    baseRevisionId: existing?.latestRevisionId ?? null,
-    changeSummary: `Refresh continuation summary after run ${run.id}`,
-    createdByAgentId: agent.id,
-    createdByRunId: run.id,
-  });
-  return result.document;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const existing = await getIssueContinuationSummaryDocument(db, issueId);
+    const body = buildContinuationSummaryMarkdown({
+      issue,
+      run,
+      agent,
+      previousSummaryBody: existing?.body ?? null,
+    });
+
+    try {
+      const result = await documentService(db).upsertIssueDocument({
+        issueId,
+        key: ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY,
+        title: ISSUE_CONTINUATION_SUMMARY_TITLE,
+        format: "markdown",
+        body,
+        baseRevisionId: existing?.latestRevisionId ?? null,
+        changeSummary: `Refresh continuation summary after run ${run.id}`,
+        createdByAgentId: agent.id,
+        createdByRunId: run.id,
+      });
+      return result.document;
+    } catch (err) {
+      if (attempt === 0 && err instanceof HttpError && err.status === 409) continue;
+      throw err;
+    }
+  }
+
+  return null;
 }
