@@ -198,6 +198,19 @@ import {
 import { resolveCoreTrustPreset, type TrustPresetResolution } from "./trust-preset-resolver.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 
+function parseDisabledWakeAdapterTypes(): Set<string> {
+  return new Set(
+    (process.env.PAPERCLIP_DISABLED_WAKE_ADAPTERS ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
+}
+
+function wakeAdapterDisabled(agent: Pick<typeof agents.$inferSelect, "adapterType">): boolean {
+  return parseDisabledWakeAdapterTypes().has(agent.adapterType);
+}
+
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
 const MAX_PERSISTED_LOG_CHUNK_CHARS = 64 * 1024;
 const MAX_RUN_EVENT_PAYLOAD_STRING_CHARS = 16 * 1024;
@@ -6748,6 +6761,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       await cancelRunInternal(run.id, "Cancelled because the agent no longer exists");
       return null;
     }
+    if (wakeAdapterDisabled(agent)) {
+      await cancelRunInternal(run.id, `Cancelled because wakeups for adapter ${agent.adapterType} are disabled`);
+      logger.warn(
+        { runId: run.id, agentId: run.agentId, adapterType: agent.adapterType },
+        "claimQueuedRun: cancelled queued run for disabled wake adapter",
+      );
+      return null;
+    }
     const invokability = companyAgents
       ? evaluateAgentInvokability(toAgentOrgRow(agent), companyAgents)
       : await getAgentInvokability(agent);
@@ -10238,6 +10259,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         invalidOrgChain: invokability.invalidOrgChain,
         ...invokability.details,
       });
+    }
+
+    if (wakeAdapterDisabled(agent)) {
+      await writeSkippedRequest("adapter.wake_disabled");
+      logger.warn(
+        { agentId, adapterType: agent.adapterType, source, reason },
+        "skipped wake for disabled adapter type",
+      );
+      return null;
     }
 
     const policy = parseHeartbeatPolicy(agent);

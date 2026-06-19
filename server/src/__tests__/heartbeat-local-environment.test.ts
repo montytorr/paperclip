@@ -3,6 +3,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   agents,
+  agentWakeupRequests,
   companies,
   createDb,
   environmentLeases,
@@ -142,5 +143,53 @@ describeEmbeddedPostgres("heartbeat local environment lifecycle", () => {
       driver: "local",
       leaseId: leases[0]?.id,
     });
+  });
+
+  it("skips wakes for disabled adapter types", async () => {
+    const previous = process.env.PAPERCLIP_DISABLED_WAKE_ADAPTERS;
+    process.env.PAPERCLIP_DISABLED_WAKE_ADAPTERS = "openclaw_gateway";
+
+    try {
+      const companyId = randomUUID();
+      const agentId = randomUUID();
+      const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix,
+        requireBoardApprovalForNewAgents: false,
+      });
+
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "OpenClaw Gateway Agent",
+        role: "engineer",
+        status: "idle",
+        adapterType: "openclaw_gateway",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      });
+
+      const heartbeat = heartbeatService(db);
+      const queued = await heartbeat.invoke(agentId, "on_demand", {}, "manual");
+      expect(queued).toBeNull();
+
+      const skippedRequests = await db
+        .select()
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.agentId, agentId));
+      expect(skippedRequests).toHaveLength(1);
+      expect(skippedRequests[0]?.status).toBe("skipped");
+      expect(skippedRequests[0]?.error).toBe("adapter.wake_disabled");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.PAPERCLIP_DISABLED_WAKE_ADAPTERS;
+      } else {
+        process.env.PAPERCLIP_DISABLED_WAKE_ADAPTERS = previous;
+      }
+    }
   });
 });
